@@ -23,6 +23,26 @@ any minor or pre-release bump.
   with the exit-code contract that CI and agent eval loops will
   branch on, and an Origin section explaining the pivot from
   `serval-run-v2` v0.2.0.
+- CLI scaffold ported from `serval-run-v2` v0.2.0: `src/lib.rs`,
+  `src/cli/{mod,exit,output}.rs`, `src/cli/commands/{mod,status}.rs`,
+  `src/bin/serval.rs`. The `status` subcommand hits a placeholder
+  `/health` endpoint (no upstream server yet; Phase 3 mock will
+  define one).
+- `HealthResponse` shape kept minimal at `status` + `version`;
+  v2-specific postgres / mongodb / redis fields intentionally
+  dropped.
+
+### Changed
+
+- CLI binary renamed `servalrun` → `serval`. Aligns the command name
+  with the `serval-cli` repo / package and leaves room for non-`run`
+  subcommands (`serval mock`, `serval lint`, ...). `CLAUDE.md` and
+  `README.md` updated to match.
+
+### Removed
+
+- `src/main.rs` hello-world stub. The `serval` binary at
+  `src/bin/serval.rs` is now the sole entry point.
 
 ### Excluded by design
 

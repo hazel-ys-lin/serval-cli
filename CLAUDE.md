@@ -8,10 +8,10 @@
 
 A CLI tool for **spec-anchored API verification**.
 
-- One binary, `servalrun`. Reads `.feature` files from git. Executes them
+- One binary, `serval`. Reads `.feature` files from git. Executes them
   against an HTTP target. Reports pass/fail.
 - Single-user, no auth, no DB. Specs in git, config in
-  `~/.servalrun/config.toml`, results in `.servalrun/reports/<ts>.json`.
+  `~/.serval/config.toml`, results in `.serval/reports/<ts>.json`.
 - The optional `mock` subcommand turns the same `.feature` files into a
   local mock HTTP server for frontend / agent consumption.
 - Source-agnostic: ingests Gherkin today, OpenAPI 3.x / AsyncAPI next.
@@ -54,7 +54,7 @@ the focused CLI successor.
   (users, projects, collections, REST handlers, JWT, multi-tenant
   auth) unless there is an explicit, documented design decision
   saying otherwise.
-- The CLI binary name is `servalrun` (one word). The repo is
+- The CLI binary name is `serval`. The repo and package name is
   `serval-cli` (with hyphen). Don't confuse them.
 
 ### Specs
@@ -69,9 +69,9 @@ the focused CLI successor.
 ### Results
 
 - A test run produces a JSON report at
-  `.servalrun/reports/<ISO-timestamp>.json` in the user's working
+  `.serval/reports/<ISO-timestamp>.json` in the user's working
   directory.
-- Reports are append-only. `servalrun history` lists them, `servalrun
+- Reports are append-only. `serval history` lists them, `serval
   diff <id>` compares two.
 
 ### CLI conventions

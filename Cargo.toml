@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "development-tools::testing"]
 [dependencies]
 # CLI
 # `env` lets clap arguments fall back to environment variables
-# (e.g. SERVAL_SERVER for `servalrun status --server ...`).
+# (e.g. SERVAL_SERVER for `serval status --server ...`).
 clap = { version = "4.5", features = ["derive", "env"] }
 
 # Async runtime (HTTP client + future mock server)
