@@ -1,0 +1,70 @@
+//! `serval` CLI library entry point.
+//!
+//! The `serval` binary in `src/bin/serval.rs` is a thin wrapper over
+//! [`run`]. Keeping the parser + dispatcher here means tests can drive
+//! the CLI without forking a process.
+//!
+//! Public surface (v0.x, still growing):
+//! - `serval status [--server URL] [--json]` — hit `/health`
+//!
+//! Exit codes are documented in [`exit`].
+
+pub mod commands;
+pub mod exit;
+pub mod output;
+
+use std::ffi::OsString;
+
+use clap::{Parser, Subcommand};
+
+use crate::cli::output::OutputFormat;
+
+/// `serval` — spec-anchored API verification CLI.
+///
+/// More subcommands land as Phase 1 progresses (`run`, `mock`,
+/// `history`, `diff`, ...). For now the CLI exists primarily to
+/// validate the scaffold.
+#[derive(Debug, Parser)]
+#[command(name = "serval", version, about, long_about = None)]
+struct Cli {
+    /// Emit JSON instead of the human-friendly table.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Show the upstream server's health report.
+    Status(commands::status::StatusArgs),
+}
+
+/// Parse the given argv and run the matching subcommand.
+///
+/// Returns the CLI's exit code; the binary in `src/bin/serval.rs`
+/// passes this straight to `std::process::exit`.
+pub fn run<I, T>(argv: I) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let cli = match Cli::try_parse_from(argv) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = e.print();
+            return e.exit_code();
+        }
+    };
+
+    let format = if cli.json {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Table
+    };
+
+    match cli.command {
+        Command::Status(args) => commands::status::run(args, format),
+    }
+}

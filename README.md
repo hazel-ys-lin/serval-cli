@@ -6,11 +6,11 @@
 
 ## What it is
 
-`servalrun` is a single-binary CLI that reads Gherkin `.feature` files from your repo, executes them against an HTTP target, and reports pass/fail.
+`serval` is a single-binary CLI that reads Gherkin `.feature` files from your repo, executes them against an HTTP target, and reports pass/fail.
 
 - Specs live in git (`specs/*.feature`).
-- Config lives in `~/.servalrun/config.toml`.
-- Results land in `.servalrun/reports/<ISO-timestamp>.json` in the working directory.
+- Config lives in `~/.serval/config.toml`.
+- Results land in `.serval/reports/<ISO-timestamp>.json` in the working directory.
 - Single-user, no auth, no database.
 
 Three deployment contexts share the same binary:
@@ -33,17 +33,17 @@ Source-agnostic by design: ingests Gherkin today; OpenAPI 3.x and AsyncAPI on th
 
 ```bash
 cargo install --path .
-servalrun --help
+serval --help
 ```
 
 Planned subcommand surface:
 
 ```bash
-servalrun run                 # execute every .feature file under specs/
-servalrun run path/to/foo     # execute a specific feature
-servalrun history             # list past report files
-servalrun diff <a> <b>        # compare two reports
-servalrun mock                # serve .feature files as a local mock HTTP server
+serval run                 # execute every .feature file under specs/
+serval run path/to/foo     # execute a specific feature
+serval history             # list past report files
+serval diff <a> <b>        # compare two reports
+serval mock                # serve .feature files as a local mock HTTP server
 ```
 
 ## Exit codes (public API)

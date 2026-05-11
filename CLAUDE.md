@@ -1,17 +1,17 @@
 # serval-cli — Development Guidelines
 
 > Successor to [serval-run-v2](https://github.com/hazel-ys-lin/serval-run-v2)
-> (frozen at `v0.2.0`). See the **Origin** section below and the Heptabase
-> decision card listed in **Heptabase pointers** before changing direction.
+> (frozen at `v0.2.0`). See the **Origin** section below before changing
+> direction.
 
 ## Project identity
 
 A CLI tool for **spec-anchored API verification**.
 
-- One binary, `servalrun`. Reads `.feature` files from git. Executes them
+- One binary, `serval`. Reads `.feature` files from git. Executes them
   against an HTTP target. Reports pass/fail.
 - Single-user, no auth, no DB. Specs in git, config in
-  `~/.servalrun/config.toml`, results in `.servalrun/reports/<ts>.json`.
+  `~/.serval/config.toml`, results in `.serval/reports/<ts>.json`.
 - The optional `mock` subcommand turns the same `.feature` files into a
   local mock HTTP server for frontend / agent consumption.
 - Source-agnostic: ingests Gherkin today, OpenAPI 3.x / AsyncAPI next.
@@ -46,43 +46,15 @@ Key turning points:
 Result: serval-run-v2 frozen at `v0.2.0`; this repo (`serval-cli`) is
 the focused CLI successor.
 
-## Heptabase pointers
-
-All architectural and product decisions live as cards on the
-**OSENSE LOGS** whiteboard. Whiteboard ID:
-`dda53d6d-6e0b-42f1-92bc-9329618f2dee`.
-
-Read these before substantial changes:
-
-| Card | What it covers |
-|---|---|
-| `8fabe0aa-f1ba-48cb-8b7c-aead25c81955` | Pivot decision: why `serval-cli` exists |
-| `736d1a13-7d2f-4032-bda9-4abc1c088e20` | Positioning: source-agnostic spec execution layer |
-| `c507e6ea-9867-494f-9c63-74f3946d915c` | Roadmap (Phase 0-6) |
-| `c86059a2-aa29-4e26-aba6-c141b03ce00a` | Why CLI, not MCP |
-| `be6dbd69-8841-401c-b253-82e3062453b1` | Spec-as-code (git-first) |
-| `93d5a4d1-5184-4950-a49a-0bd7c8acc253` | Phase 3 Mock Server design |
-| `4327fbc6-9971-4490-b27c-02b00b5bda29` | Phase 4 Agent Eval Harness |
-| `c89c8118-36ab-4155-b5f1-4451a668b77c` | spec for-agent compressed format RFC |
-| `62e1fbe1-b696-4ee6-a838-e54bd1154308` | Phase 5 LLM-augmented spec authoring |
-| `0ab12828-f25c-4f36-aa01-0ef407c5ba2d` | Phase 4 threat model |
-| `d77318bf-2bdf-4984-be6d-3fb2f97955f2` | Live progress tracker (the only card that needs updating; the rest are reference) |
-
-CLI for Heptabase access:
-
-```bash
-heptabase note read <cardId>          # full content
-heptabase whiteboard cards dda53d6d-6e0b-42f1-92bc-9329618f2dee
-```
-
 ## Critical rules
 
 ### Repo identity
 
 - This is **not** serval-run-v2. Do not reintroduce web-app concepts
   (users, projects, collections, REST handlers, JWT, multi-tenant
-  auth) unless an explicit Heptabase decision card says so.
-- The CLI binary name is `servalrun` (one word). The repo is
+  auth) unless there is an explicit, documented design decision
+  saying otherwise.
+- The CLI binary name is `serval`. The repo and package name is
   `serval-cli` (with hyphen). Don't confuse them.
 
 ### Specs
@@ -97,9 +69,9 @@ heptabase whiteboard cards dda53d6d-6e0b-42f1-92bc-9329618f2dee
 ### Results
 
 - A test run produces a JSON report at
-  `.servalrun/reports/<ISO-timestamp>.json` in the user's working
+  `.serval/reports/<ISO-timestamp>.json` in the user's working
   directory.
-- Reports are append-only. `servalrun history` lists them, `servalrun
+- Reports are append-only. `serval history` lists them, `serval
   diff <id>` compares two.
 
 ### CLI conventions
@@ -121,8 +93,8 @@ heptabase whiteboard cards dda53d6d-6e0b-42f1-92bc-9329618f2dee
 
 - A REST server (the `mock` subcommand serves HTTP, but is started by
   the CLI and shuts down with it — not a daemon).
-- An MCP server. Decision: CLI > MCP for this use case
-  (`c86059a2-...` card). Claude Code uses the CLI via Bash.
+- An MCP server. Decision: CLI > MCP for this use case. Claude Code
+  uses the CLI via Bash.
 - Code generators. Static codegen per language is brittle; Claude Code
   / users translate to their preferred language.
 - An authoring UI. Specs are written in editors; this tool is for
@@ -158,21 +130,6 @@ heptabase whiteboard cards dda53d6d-6e0b-42f1-92bc-9329618f2dee
   feature branches is the team norm (single committer).
 - Open a draft PR to trigger CI before fast-forward merging when the
   change is non-trivial.
-
-## Learning notes
-
-- Rust learning insights go to the existing Heptabase card on the Rust
-  whiteboard. **Do not create a local file.**
-  - Card: `Rust 學習筆記：Python/FastAPI 開發者的 Rust 之路`
-  - card_id: `fd4f349b-9aaa-48e3-acc0-66716c004505`
-  - whiteboard: `986b86a9-fb9d-4fa1-89c0-959ff1002412` (Rust)
-- Append command:
-  ```bash
-  heptabase note append fd4f349b-9aaa-48e3-acc0-66716c004505 \
-    --content "## <主題>\n\n<心得內容>"
-  ```
-- Notes are written from a Python/FastAPI developer's perspective, to
-  build mental models for Rust concepts.
 
 ## User preferences
 
