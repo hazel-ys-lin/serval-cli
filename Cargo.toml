@@ -1,6 +1,45 @@
 [package]
 name = "serval-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.0"
 edition = "2024"
+authors = ["Hazel Lin <hazel.ys.lin@gmail.com>"]
+license = "MIT"
+description = "Spec-anchored API verification CLI. Runs Gherkin .feature files against HTTP targets and reports pass/fail."
+repository = "https://github.com/hazel-ys-lin/serval-cli"
+readme = "README.md"
+keywords = ["cli", "api", "testing", "gherkin", "bdd"]
+categories = ["command-line-utilities", "development-tools::testing"]
 
 [dependencies]
+# CLI
+# `env` lets clap arguments fall back to environment variables
+# (e.g. SERVAL_SERVER for `servalrun status --server ...`).
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Async runtime (HTTP client + future mock server)
+tokio = { version = "1.49.0", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP client. `blocking` for the CLI run path; async path stays for
+# the mock server subcommand (Phase 3).
+reqwest = { version = "0.13.1", features = ["json", "blocking"] }
+
+# Serialization
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "0.8"
+
+# Gherkin parser (.feature files)
+gherkin = "0.15"
+
+# Logging
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2.0.18"
+
+# Misc
+uuid = { version = "1.16", features = ["v4", "serde"] }
+time = { version = "0.3.45", features = ["serde", "macros", "formatting"] }
+dotenvy = "0.15.7"
