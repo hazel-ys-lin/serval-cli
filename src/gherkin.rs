@@ -70,11 +70,24 @@ impl GherkinService {
             .map(|bg| Self::parse_steps(&bg.steps))
             .unwrap_or_default();
 
-        let scenarios = feature
+        let mut scenarios: Vec<ParsedScenario> = feature
             .scenarios
             .iter()
             .map(Self::parse_scenario)
             .collect::<Result<Vec<_>>>()?;
+
+        for rule in &feature.rules {
+            let rule_tags: Vec<String> = rule.tags.iter().map(|t| t.to_string()).collect();
+            for scenario in &rule.scenarios {
+                let mut parsed = Self::parse_scenario(scenario)?;
+                for tag in &rule_tags {
+                    if !parsed.tags.contains(tag) {
+                        parsed.tags.push(tag.clone());
+                    }
+                }
+                scenarios.push(parsed);
+            }
+        }
 
         Ok(ParsedFeature {
             name: feature.name.clone(),

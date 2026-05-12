@@ -81,6 +81,21 @@ any minor or pre-release bump.
   steps, not from a magic Examples column. Cleaner separation
   between row data and response expectations.
 
+### Fixed
+
+- `GherkinService::parse` now walks `Feature.rules[].scenarios` in
+  addition to `Feature.scenarios`. Scenarios written inside a
+  Gherkin 6+ `Rule:` block were previously dropped from
+  `ParsedFeature.scenarios`, so a perfectly valid Rule-organized
+  spec parsed cleanly but reported zero scenarios — a regression
+  inherited from `serval-run-v2`'s parser that only surfaced once a
+  Rule-style spec was thrown at it.
+- Rule-level tags now propagate onto each inner scenario
+  (deduplicated against the scenario's own tags). Matches the
+  Cucumber tag-inheritance contract so `serval run --tag @foo`
+  filters correctly when `@foo` sits on the `Rule:` line rather
+  than directly on a `Scenario:`.
+
 ### Excluded by design
 
 - Web-app and multi-user deps inherited from `serval-run-v2` are
