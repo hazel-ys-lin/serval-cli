@@ -54,3 +54,8 @@ assert_cmd = "2"
 predicates = "3"
 # Isolated tempdirs for report-writer tests.
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -2,7 +2,7 @@
 
 > Spec-anchored API verification CLI. Run Gherkin `.feature` files against any HTTP target, get pass/fail.
 
-**Status:** early alpha — Phase 0 in progress. The binary scaffold lands one commit at a time; the subcommands listed below are the planned surface, not all functional yet.
+**Status:** v0.3.0 — Phase 0 (lite-native CLI scaffold) and Phase 1 (CLI primary interface) complete. Source-agnostic ingestion (OpenAPI 3.x / AsyncAPI) is on the roadmap; today the CLI consumes Gherkin only.
 
 ## What it is
 
@@ -19,8 +19,6 @@ Three deployment contexts share the same binary:
 - **CI/CD** — green-light builds when contract assertions hold.
 - **Agent eval loops** (Claude Code, etc.) — Bash-driven verification of LLM-generated changes.
 
-Source-agnostic by design: ingests Gherkin today; OpenAPI 3.x and AsyncAPI on the roadmap.
-
 ## What it isn't
 
 - Not a hosted REST service.
@@ -29,22 +27,67 @@ Source-agnostic by design: ingests Gherkin today; OpenAPI 3.x and AsyncAPI on th
 - Not a test framework — sits *beside* `cargo test` / `pytest`, doesn't replace them.
 - Not an MCP server. Claude Code drives it via `Bash`.
 
+## Install
+
+### Prebuilt binary (no Rust toolchain needed)
+
+```sh
+curl -fsSL https://github.com/hazel-ys-lin/serval-cli/releases/latest/download/serval-cli-installer.sh | sh
+```
+
+Drops the `serval` binary into `$CARGO_HOME/bin` (default `~/.cargo/bin`). Make sure that directory is on your `PATH`.
+
+### From source
+
+```sh
+cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.3.0
+```
+
+### Manual download
+
+Pick the `.tar.xz` matching your OS/arch from the [latest release](https://github.com/hazel-ys-lin/serval-cli/releases/latest), extract the `serval` binary, and place it on your `PATH`.
+
 ## Quick start
 
-```bash
-cargo install --path .
-serval --help
+```sh
+# 1. Configure an environment once.
+serval env set local --base-url http://localhost:3000 --make-default
+
+# 2. Drop a `.feature` file under specs/.
+mkdir -p specs && cat > specs/health.feature <<'EOF'
+---
+api:
+  path: /health
+  method: GET
+---
+Feature: Service is up
+  Scenario: /health returns 200
+    Then status should be 200
+EOF
+
+# 3. Run it.
+serval run specs/health.feature
 ```
 
-Planned subcommand surface:
+The run writes a JSON report under `.serval/reports/`; list and compare past runs with `serval history` and `serval diff`.
 
-```bash
-serval run                 # execute every .feature file under specs/
-serval run path/to/foo     # execute a specific feature
-serval history             # list past report files
-serval diff <a> <b>        # compare two reports
-serval mock                # serve .feature files as a local mock HTTP server
+## Subcommand surface (v0.3.0)
+
+```text
+serval run <path> [--env NAME | --base-url URL] [--endpoint P] [--method M]
+                  [--report-dir DIR] [--no-report] [--json]
+serval history       [--limit N] [--report-dir DIR] [--json]
+serval diff <before> <after> [--report-dir DIR] [--json]
+serval api list      [--dir DIR] [--json]
+serval api show <p>  [--dir DIR] [--json]
+serval api find <q>  [--dir DIR] [--json]
+serval env list / show NAME / set NAME --base-url URL [--make-default] /
+            remove NAME            [--config-file PATH] [--json]
+serval config path / show          [--config-file PATH] [--json]
+serval spec validate [<path>]      [--json]
 ```
+
+`--json` is global; pass it on any subcommand to switch the output to machine-readable JSON.
 
 ## Exit codes (public API)
 
