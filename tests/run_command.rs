@@ -589,6 +589,138 @@ fn run_vacuous_pass_allowed_with_flag() {
 }
 
 #[test]
+fn run_captures_response_field_into_scenario_variable() {
+    // Phase 3.0: a login pattern captures `/access_token` from the
+    // response body; a subsequent pattern reads it via `{{$token}}`
+    // in an Authorization header. The mock for the protected endpoint
+    // matches on the exact header value, so the scenario only PASSes
+    // if the variable round-tripped correctly.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/auth/login");
+        then.status(200)
+            .json_body(json!({"access_token": "tk-abc-123"}));
+    });
+    server.mock(|when, then| {
+        when.method(Method::GET)
+            .path("/protected")
+            .header("Authorization", "Bearer tk-abc-123");
+        then.status(200).json_body(json!({"ok": true}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        r#"
+[[pattern]]
+regex = '(?i)i log in'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/auth/login"
+body_from = { kind = "doc_string" }
+capture_response = { token = "/access_token" }
+
+[[pattern]]
+regex = '(?i)i fetch the protected resource'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "GET"
+endpoint_template = "/protected"
+headers = { Authorization = "Bearer {{$token}}" }
+"#,
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("chain.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Chain\n  Scenario: login then fetch\n    When I log in\n      \"\"\"\n      {\"username\": \"u\", \"password\": \"p\"}\n      \"\"\"\n    And I fetch the protected resource\n    Then status should be 200\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/unused",
+            "--method",
+            "GET",
+            "--no-report",
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
+}
+
+#[test]
+fn run_global_header_flag_flows_into_http_request_pattern() {
+    // Phase 3.0: --header is parsed into TestConfig.custom_headers and
+    // attached to every HTTP firing, including pattern-driven
+    // `Action::HttpRequest` calls (not just the frontmatter fallback).
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET)
+            .path("/things")
+            .header("X-Tenant", "acme");
+        then.status(200).json_body(json!([]));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        r#"
+[[pattern]]
+regex = '(?i)i fetch things'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "GET"
+endpoint_template = "/things"
+"#,
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("hdr.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Hdr\n  Scenario: with tenant header\n    When I fetch things\n    Then status should be 200\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/unused",
+            "--method",
+            "GET",
+            "--no-report",
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--header",
+            "X-Tenant: acme",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
+}
+
+#[test]
 fn run_exits_3_when_no_base_url_nor_env_resolves() {
     // Config file with no entries — neither --base-url nor --env
     // can resolve a target.

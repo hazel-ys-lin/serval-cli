@@ -92,6 +92,14 @@ pub struct RunArgs {
     /// fail to guard against silent pattern-coverage gaps.
     #[arg(long)]
     pub allow_no_assertions: bool,
+
+    /// Extra HTTP header to send with every request (both
+    /// pattern-driven `Action::HttpRequest` calls and the
+    /// frontmatter fallback). Repeat the flag for multiple
+    /// headers. Format: `"Key: value"`. Typical use: forward an
+    /// auth bearer token to the target backend.
+    #[arg(long = "header", value_name = "KEY: VALUE")]
+    pub headers: Vec<String>,
 }
 
 pub fn run(args: RunArgs, format: OutputFormat) -> i32 {
@@ -136,9 +144,11 @@ fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
         .map_err(|e| Error::System(format!("tokio runtime: {e}")))?;
 
     let user_patterns = load_user_patterns(args.patterns_file.as_deref())?;
+    let custom_headers = parse_header_args(&args.headers)?;
     let runner = TestRunner::with_config(TestConfig {
         timeout: Duration::from_secs(args.timeout),
         allow_no_assertions: args.allow_no_assertions,
+        custom_headers,
         ..Default::default()
     })?
     .extend_patterns(user_patterns);
@@ -202,6 +212,19 @@ fn build_report(
         summary: RunSummary::from_results(results),
         results: results.to_vec(),
     }
+}
+
+fn parse_header_args(raw: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for h in raw {
+        let (k, v) = h.split_once(':').ok_or_else(|| {
+            Error::Spec(format!(
+                "invalid --header {h:?}: expected `Key: Value` (colon-separated)"
+            ))
+        })?;
+        out.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    Ok(out)
 }
 
 fn load_user_patterns(explicit: Option<&std::path::Path>) -> Result<Vec<patterns::StepPattern>> {

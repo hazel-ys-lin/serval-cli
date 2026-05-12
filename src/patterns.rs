@@ -20,6 +20,7 @@
 //! step's keyword type matches the filter, the action runs against
 //! the scenario's [`crate::runner::ScenarioContext`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -67,6 +68,10 @@ pub enum ValueSource {
     /// A constant baked into the pattern definition. No
     /// templating / substitution at Phase 2.3.
     Literal(Value),
+    /// Look up a named scenario variable previously captured by an
+    /// `HttpRequest` action's `capture_response` field. Returns
+    /// `None` if the variable is not set.
+    Variable(String),
 }
 
 /// What to do when a pattern's regex matches a step's text and the
@@ -122,13 +127,19 @@ pub enum Action {
     AssertBodyContainsFromMatchGroup { group: String },
 
     /// Fire an HTTP request and append the response to
-    /// [`ScenarioContext::responses`]. `endpoint_template` may
-    /// reference named regex capture groups from the matching
-    /// pattern as `{{name}}`; unknown names expand to empty.
+    /// [`ScenarioContext::responses`]. `endpoint_template` /
+    /// `headers` values may reference regex capture groups as
+    /// `{{name}}` or scenario variables as `{{$name}}`; unknown
+    /// names expand to empty. `capture_response` evaluates each
+    /// JSON-pointer expression against the response body and
+    /// stores the result in `ScenarioContext.variables` under
+    /// the given key for later steps.
     HttpRequest {
         method: String,
         endpoint_template: String,
         body_from: Option<ValueSource>,
+        headers: HashMap<String, String>,
+        capture_response: HashMap<String, String>,
     },
 }
 
@@ -236,6 +247,10 @@ enum TomlAction {
         endpoint_template: String,
         #[serde(default)]
         body_from: Option<TomlValueSource>,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        #[serde(default)]
+        capture_response: HashMap<String, String>,
     },
 }
 
@@ -245,6 +260,7 @@ enum TomlValueSource {
     MatchGroup { name: String },
     DocString,
     Literal { value: Value },
+    Variable { name: String },
 }
 
 fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
@@ -295,10 +311,14 @@ fn toml_to_action(t: TomlAction) -> Action {
             method,
             endpoint_template,
             body_from,
+            headers,
+            capture_response,
         } => Action::HttpRequest {
             method,
             endpoint_template,
             body_from: body_from.map(toml_to_value_source),
+            headers,
+            capture_response,
         },
     }
 }
@@ -308,6 +328,7 @@ fn toml_to_value_source(t: TomlValueSource) -> ValueSource {
         TomlValueSource::MatchGroup { name } => ValueSource::MatchGroup(name),
         TomlValueSource::DocString => ValueSource::DocString,
         TomlValueSource::Literal { value } => ValueSource::Literal(value),
+        TomlValueSource::Variable { name } => ValueSource::Variable(name),
     }
 }
 
@@ -375,10 +396,21 @@ pub fn builtin_patterns() -> Vec<StepPattern> {
     ]
 }
 
+/// Per-call cross-cutting state for [`apply`]. Bundles the HTTP
+/// client, base URL, and global headers (from `--header` / TestConfig)
+/// so the function signature stays manageable as Phase 3.0 adds
+/// header support.
+pub struct ApplyContext<'a> {
+    pub client: &'a Client,
+    pub base_url: &'a str,
+    pub global_headers: &'a HashMap<String, String>,
+}
+
 /// Apply every pattern whose regex matches `text` and whose keyword
 /// filter accepts `step`. Non-HTTP actions mutate `context` /
 /// `example_data` directly; `Action::HttpRequest` fires through
-/// `client` and appends the result to `context.responses`.
+/// `apply_ctx.client` and appends the result to `context.responses`,
+/// optionally capturing response fields into `context.variables`.
 ///
 /// Returns `Err` only when an HTTP firing fails at the transport
 /// level (DNS, timeout, connection refused). Assertion-style
@@ -390,8 +422,7 @@ pub async fn apply(
     text: &str,
     context: &mut ScenarioContext,
     example_data: &Value,
-    client: &Client,
-    base_url: &str,
+    apply_ctx: &ApplyContext<'_>,
 ) -> Result<()> {
     let kt = KeywordType::from_str(&step.keyword_type);
     for pattern in patterns {
@@ -411,8 +442,7 @@ pub async fn apply(
                 step,
                 context,
                 example_data,
-                client,
-                base_url,
+                apply_ctx,
             )
             .await?;
         }
@@ -420,7 +450,6 @@ pub async fn apply(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_action(
     action: &Action,
     text: &str,
@@ -428,24 +457,26 @@ async fn execute_action(
     step: &ParsedStep,
     context: &mut ScenarioContext,
     example_data: &Value,
-    client: &Client,
-    base_url: &str,
+    apply_ctx: &ApplyContext<'_>,
 ) -> Result<()> {
     match action {
         Action::HttpRequest {
             method,
             endpoint_template,
             body_from,
+            headers,
+            capture_response,
         } => {
             fire_http_request(
                 method,
                 endpoint_template,
                 body_from.as_ref(),
+                headers,
+                capture_response,
                 captures,
                 step,
                 context,
-                client,
-                base_url,
+                apply_ctx,
             )
             .await
         }
@@ -534,22 +565,37 @@ async fn fire_http_request(
     method: &str,
     endpoint_template: &str,
     body_from: Option<&ValueSource>,
+    pattern_headers: &HashMap<String, String>,
+    capture_response: &HashMap<String, String>,
     captures: &Captures<'_>,
     step: &ParsedStep,
     context: &mut ScenarioContext,
-    client: &Client,
-    base_url: &str,
+    apply_ctx: &ApplyContext<'_>,
 ) -> Result<()> {
-    let endpoint = substitute_endpoint(endpoint_template, captures);
-    let url = format!("{}{}", base_url.trim_end_matches('/'), endpoint);
+    let endpoint = substitute_template(endpoint_template, captures, &context.variables);
+    let url = format!("{}{}", apply_ctx.base_url.trim_end_matches('/'), endpoint);
     let parsed_method = parse_method(method)?;
 
-    let mut req = client.request(parsed_method, &url);
+    let mut req = apply_ctx.client.request(parsed_method, &url);
+    // Global headers from TestConfig (CLI --header / programmatic).
+    for (k, v) in apply_ctx.global_headers {
+        req = req.header(k, v);
+    }
+    // Headers accumulated on the scenario context via
+    // SetHeaderFromWordScan etc.
     for (k, v) in &context.request_headers {
         req = req.header(k, v);
     }
+    // Per-pattern headers — values support `{{regex}}` / `{{$var}}`
+    // substitution so an authenticated pattern can pull a token from
+    // an earlier login step's captured response.
+    for (k, v) in pattern_headers {
+        let resolved = substitute_template(v, captures, &context.variables);
+        req = req.header(k, resolved);
+    }
 
-    let body = body_from.and_then(|src| resolve_value_source(src, step, captures));
+    let body =
+        body_from.and_then(|src| resolve_value_source(src, step, captures, &context.variables));
     if let Some(b) = &body {
         req = req.json(b);
     }
@@ -562,6 +608,16 @@ async fn fire_http_request(
     let duration_ms = started.elapsed().as_millis() as i64;
     let status = response.status().as_u16() as i16;
     let resp_body = response.json::<Value>().await.unwrap_or(Value::Null);
+
+    // Phase 3.0: variable capture. Each `name = "/json/pointer"` entry
+    // pulls a value out of the response body via RFC 6901 and stores
+    // it on the scenario context under `name` for subsequent steps to
+    // reference via `{{$name}}` or `ValueSource::Variable`.
+    for (var_name, pointer) in capture_response {
+        if let Some(captured) = resp_body.pointer(pointer) {
+            context.variables.insert(var_name.clone(), captured.clone());
+        }
+    }
 
     context.responses.push(HttpResponse {
         method: method.to_string(),
@@ -587,17 +643,34 @@ fn parse_method(method: &str) -> Result<reqwest::Method> {
     }
 }
 
-fn substitute_endpoint(template: &str, captures: &Captures<'_>) -> String {
+/// Substitute `{{regex_group}}` and `{{$variable}}` placeholders in
+/// `template`. Capture-group references read from the matching
+/// pattern's `Captures`; variable references read from the scenario
+/// context's accumulated variables (populated by `capture_response`).
+/// Unknown names expand to empty.
+fn substitute_template(
+    template: &str,
+    captures: &Captures<'_>,
+    variables: &HashMap<String, Value>,
+) -> String {
     static PLACEHOLDER: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\{\{(\w+)\}\}").expect("hardcoded regex must compile"));
+        LazyLock::new(|| Regex::new(r"\{\{(\$)?(\w+)\}\}").expect("hardcoded regex must compile"));
     PLACEHOLDER
         .replace_all(template, |caps: &Captures| {
-            let name = &caps[1];
-            captures
-                .name(name)
-                .map(|m| m.as_str())
-                .unwrap_or("")
-                .to_string()
+            let is_var = caps.get(1).is_some();
+            let name = &caps[2];
+            if is_var {
+                match variables.get(name) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                }
+            } else {
+                captures
+                    .name(name)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default()
+            }
         })
         .into_owned()
 }
@@ -606,6 +679,7 @@ fn resolve_value_source(
     src: &ValueSource,
     step: &ParsedStep,
     captures: &Captures<'_>,
+    variables: &HashMap<String, Value>,
 ) -> Option<Value> {
     match src {
         ValueSource::MatchGroup(name) => captures
@@ -615,6 +689,7 @@ fn resolve_value_source(
             serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::String(s.to_string()))
         }),
         ValueSource::Literal(v) => Some(v.clone()),
+        ValueSource::Variable(name) => variables.get(name).cloned(),
     }
 }
 
@@ -707,17 +782,15 @@ mod tests {
         example_data: &Value,
     ) {
         let client = Client::new();
-        apply(
-            patterns,
-            step,
-            &step.text,
-            ctx,
-            example_data,
-            &client,
-            "http://0.0.0.0",
-        )
-        .await
-        .unwrap();
+        let headers: HashMap<String, String> = HashMap::new();
+        let apply_ctx = ApplyContext {
+            client: &client,
+            base_url: "http://0.0.0.0",
+            global_headers: &headers,
+        };
+        apply(patterns, step, &step.text, ctx, example_data, &apply_ctx)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -952,13 +1025,20 @@ mod tests {
         assert_eq!(out, "hello <name>");
     }
 
+    fn empty_vars() -> HashMap<String, Value> {
+        HashMap::new()
+    }
+
     #[test]
     fn endpoint_template_substitutes_named_groups() {
         let re = Regex::new(r"^id=(?P<id>\w+)$").unwrap();
         let caps = re.captures("id=alice").unwrap();
-        assert_eq!(substitute_endpoint("/users/{{id}}", &caps), "/users/alice");
         assert_eq!(
-            substitute_endpoint("/{{id}}/posts/{{id}}", &caps),
+            substitute_template("/users/{{id}}", &caps, &empty_vars()),
+            "/users/alice"
+        );
+        assert_eq!(
+            substitute_template("/{{id}}/posts/{{id}}", &caps, &empty_vars()),
             "/alice/posts/alice"
         );
     }
@@ -967,14 +1047,54 @@ mod tests {
     fn endpoint_template_unknown_group_expands_to_empty() {
         let re = Regex::new(r"^id=(?P<id>\w+)$").unwrap();
         let caps = re.captures("id=alice").unwrap();
-        assert_eq!(substitute_endpoint("/users/{{missing}}", &caps), "/users/");
+        assert_eq!(
+            substitute_template("/users/{{missing}}", &caps, &empty_vars()),
+            "/users/"
+        );
     }
 
     #[test]
     fn endpoint_template_no_placeholders_passes_through() {
         let re = Regex::new(r"^foo$").unwrap();
         let caps = re.captures("foo").unwrap();
-        assert_eq!(substitute_endpoint("/static/path", &caps), "/static/path");
+        assert_eq!(
+            substitute_template("/static/path", &caps, &empty_vars()),
+            "/static/path"
+        );
+    }
+
+    #[test]
+    fn template_substitutes_scenario_variable() {
+        let re = Regex::new(r"^x$").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert("user_id".to_string(), Value::String("u-123".to_string()));
+        assert_eq!(
+            substitute_template("/users/{{$user_id}}", &caps, &vars),
+            "/users/u-123"
+        );
+    }
+
+    #[test]
+    fn template_unknown_variable_expands_to_empty() {
+        let re = Regex::new(r"^x$").unwrap();
+        let caps = re.captures("x").unwrap();
+        assert_eq!(
+            substitute_template("/auth/{{$missing}}", &caps, &empty_vars()),
+            "/auth/"
+        );
+    }
+
+    #[test]
+    fn template_variable_and_capture_in_same_string() {
+        let re = Regex::new(r"^id=(?P<id>\w+)$").unwrap();
+        let caps = re.captures("id=alice").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert("tenant".to_string(), Value::String("acme".to_string()));
+        assert_eq!(
+            substitute_template("/{{$tenant}}/users/{{id}}", &caps, &vars),
+            "/acme/users/alice"
+        );
     }
 
     #[test]
@@ -982,8 +1102,12 @@ mod tests {
         let re = Regex::new(r"name=(?P<name>\w+)").unwrap();
         let caps = re.captures("name=bob").unwrap();
         let step = action_step("");
-        let resolved =
-            resolve_value_source(&ValueSource::MatchGroup("name".to_string()), &step, &caps);
+        let resolved = resolve_value_source(
+            &ValueSource::MatchGroup("name".to_string()),
+            &step,
+            &caps,
+            &empty_vars(),
+        );
         assert_eq!(resolved, Some(Value::String("bob".to_string())));
     }
 
@@ -992,8 +1116,12 @@ mod tests {
         let re = Regex::new(r"x").unwrap();
         let caps = re.captures("x").unwrap();
         let step = action_step("");
-        let resolved =
-            resolve_value_source(&ValueSource::MatchGroup("nope".to_string()), &step, &caps);
+        let resolved = resolve_value_source(
+            &ValueSource::MatchGroup("nope".to_string()),
+            &step,
+            &caps,
+            &empty_vars(),
+        );
         assert!(resolved.is_none());
     }
 
@@ -1003,7 +1131,7 @@ mod tests {
         let caps = re.captures("x").unwrap();
         let mut step = action_step("");
         step.doc_string = Some(r#"{"a":1}"#.to_string());
-        let resolved = resolve_value_source(&ValueSource::DocString, &step, &caps);
+        let resolved = resolve_value_source(&ValueSource::DocString, &step, &caps, &empty_vars());
         assert_eq!(resolved, Some(serde_json::json!({"a": 1})));
     }
 
@@ -1013,7 +1141,7 @@ mod tests {
         let caps = re.captures("x").unwrap();
         let mut step = action_step("");
         step.doc_string = Some("not json".to_string());
-        let resolved = resolve_value_source(&ValueSource::DocString, &step, &caps);
+        let resolved = resolve_value_source(&ValueSource::DocString, &step, &caps, &empty_vars());
         assert_eq!(resolved, Some(Value::String("not json".to_string())));
     }
 
@@ -1023,8 +1151,43 @@ mod tests {
         let caps = re.captures("x").unwrap();
         let step = action_step("");
         let v = serde_json::json!({"hardcoded": true});
-        let resolved = resolve_value_source(&ValueSource::Literal(v.clone()), &step, &caps);
+        let resolved = resolve_value_source(
+            &ValueSource::Literal(v.clone()),
+            &step,
+            &caps,
+            &empty_vars(),
+        );
         assert_eq!(resolved, Some(v));
+    }
+
+    #[test]
+    fn value_source_variable_resolves_when_present() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let step = action_step("");
+        let mut vars = HashMap::new();
+        vars.insert("token".to_string(), Value::String("abc.def".to_string()));
+        let resolved = resolve_value_source(
+            &ValueSource::Variable("token".to_string()),
+            &step,
+            &caps,
+            &vars,
+        );
+        assert_eq!(resolved, Some(Value::String("abc.def".to_string())));
+    }
+
+    #[test]
+    fn value_source_variable_missing_resolves_to_none() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let step = action_step("");
+        let resolved = resolve_value_source(
+            &ValueSource::Variable("nope".to_string()),
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert!(resolved.is_none());
     }
 
     // ---- TOML loader tests ----
@@ -1204,10 +1367,51 @@ body_from = { kind = "match_group", name = "name" }
                 method,
                 endpoint_template,
                 body_from,
+                ..
             } => {
                 assert_eq!(method, "POST");
                 assert_eq!(endpoint_template, "/users");
                 assert!(matches!(body_from, Some(ValueSource::MatchGroup(s)) if s == "name"));
+            }
+            other => panic!("expected HttpRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_http_request_with_capture_and_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "cap.toml",
+            r#"
+[[pattern]]
+regex = '(?i)protected access'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/things"
+headers = { Authorization = "Bearer {{$token}}", X-Tenant = "acme" }
+capture_response = { id = "/id", trace = "/meta/trace_id" }
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        match &patterns[0].actions[0] {
+            Action::HttpRequest {
+                headers,
+                capture_response,
+                ..
+            } => {
+                assert_eq!(
+                    headers.get("Authorization").map(String::as_str),
+                    Some("Bearer {{$token}}")
+                );
+                assert_eq!(headers.get("X-Tenant").map(String::as_str), Some("acme"));
+                assert_eq!(capture_response.get("id").map(String::as_str), Some("/id"));
+                assert_eq!(
+                    capture_response.get("trace").map(String::as_str),
+                    Some("/meta/trace_id")
+                );
             }
             other => panic!("expected HttpRequest, got {other:?}"),
         }

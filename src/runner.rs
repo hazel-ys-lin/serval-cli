@@ -146,6 +146,12 @@ pub struct ScenarioContext {
     /// request driven by the spec's frontmatter `api.path` /
     /// `api.method` (backward compatible with Phase 2.2 specs).
     pub responses: Vec<HttpResponse>,
+    /// Named scenario variables captured by `HttpRequest`
+    /// actions' `capture_response` fields. Sticky across steps
+    /// within a scenario; reset between scenarios. Referenced from
+    /// later patterns via `{{$name}}` substitution or
+    /// `ValueSource::Variable`.
+    pub variables: HashMap<String, serde_json::Value>,
 }
 
 pub struct TestRunner {
@@ -318,14 +324,18 @@ impl TestRunner {
         // Text-driven actions: status codes, headers, query params,
         // body cues, HTTP firing, doc-string body / assertion.
         // Pattern engine handles all of it.
+        let apply_ctx = patterns::ApplyContext {
+            client: &self.client,
+            base_url: &env.base_url,
+            global_headers: &self.config.custom_headers,
+        };
         patterns::apply(
             &self.patterns,
             step,
             &text,
             context,
             example_data,
-            &self.client,
-            &env.base_url,
+            &apply_ctx,
         )
         .await
     }

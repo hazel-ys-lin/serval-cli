@@ -9,6 +9,38 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+### Added
+
+- **Phase 3.0** — scenario variables and per-pattern headers,
+  the engine groundwork for real-backend dogfood.
+  - `Action::HttpRequest` grows a `capture_response: HashMap<String, String>`
+    field. Each entry is `var_name → JSON pointer` (RFC 6901);
+    after the response body lands, the pointer is evaluated and
+    the result is stored on `ScenarioContext.variables` under
+    `var_name`.
+  - `Action::HttpRequest` grows a `headers: HashMap<String, String>`
+    field for per-pattern headers. Values support template
+    substitution (regex captures + scenario variables).
+  - New `ValueSource::Variable(name)` variant lets `body_from`
+    pull a previously captured value as the whole request body.
+  - Template substitution learns the `{{$name}}` syntax for
+    scenario variables (alongside the existing `{{name}}` regex
+    capture syntax). Unknown variables expand to empty, matching
+    the existing capture-group behaviour.
+  - New `--header "Key: Value"` CLI flag (repeatable). Parsed
+    into `TestConfig.custom_headers` and attached to every HTTP
+    firing — both pattern-driven `Action::HttpRequest` calls and
+    the frontmatter fallback.
+
+### Changed
+
+- `patterns::apply` swapped its `&Client, &str` parameter pair
+  for an `&ApplyContext` struct bundling client, base URL, and
+  global headers. Pure refactor — runner integration unchanged.
+- `ScenarioContext` grew a `variables: HashMap<String, Value>`
+  field, populated by `capture_response` and read by template
+  substitution / `ValueSource::Variable`.
+
 ## [0.4.0] - 2026-05-12
 
 Phase 2 complete: the step-pattern engine ships with a
