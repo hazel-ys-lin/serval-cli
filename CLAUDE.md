@@ -122,7 +122,6 @@ the focused CLI successor.
 - Conventional Commits: `feat(scope): ...`, `fix(scope): ...`,
   `docs: ...`, `chore: ...`, `refactor: ...`, `ci: ...`, `style: ...`.
 - Subject ≤ 72 chars. Body explains the why and notable trade-offs.
-- Author email: `hazel.ys.lin@gmail.com` (set per-repo).
 - All commits include
   `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
 - Branch naming: `feat/<phase>/<scope>`, `fix/<scope>`,
@@ -130,16 +129,3 @@ the focused CLI successor.
   feature branches is the team norm (single committer).
 - Open a draft PR to trigger CI before fast-forward merging when the
   change is non-trivial.
-
-## User preferences
-
-- Communicates in **Traditional Chinese (繁體中文)**.
-- Prefers **concise, opinionated** responses. Don't hedge.
-- Verifies code locally (cargo isn't installed in Claude's environment);
-  always wait for the user's explicit confirmation (e.g. "commit",
-  "OK", "push") before committing, pushing, or merging.
-- Decision flow: present trade-offs honestly, recommend one, **ask
-  before acting** on irreversible actions (commits, pushes, branch
-  deletes, releases).
-- The work is for **daily use at OSENSE + portfolio**, not a commercial
-  product.
