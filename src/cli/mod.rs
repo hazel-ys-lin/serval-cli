@@ -6,6 +6,8 @@
 //!
 //! Public surface (v0.x, still growing):
 //! - `serval status [--server URL] [--json]` — hit `/health`
+//! - `serval run <path> --base-url URL [--endpoint P] [--method M] [--json]`
+//!   — execute a `.feature` file against an HTTP target
 //!
 //! Exit codes are documented in [`exit`].
 
@@ -39,6 +41,9 @@ struct Cli {
 enum Command {
     /// Show the upstream server's health report.
     Status(commands::status::StatusArgs),
+
+    /// Execute a `.feature` file against an HTTP target.
+    Run(commands::run::RunArgs),
 }
 
 /// Parse the given argv and run the matching subcommand.
@@ -66,5 +71,6 @@ where
 
     match cli.command {
         Command::Status(args) => commands::status::run(args, format),
+        Command::Run(args) => commands::run::run(args, format),
     }
 }

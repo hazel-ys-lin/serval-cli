@@ -7,6 +7,8 @@
 //! Core building blocks live as sibling modules so subcommands and
 //! external callers can compose them:
 //! - [`error`] — `Error` enum + `Result` alias mapped to CLI exit codes
+//! - [`frontmatter`] — optional YAML frontmatter parser for `.feature`
+//!   files (`api.path` / `api.method` / `collection` / `implements`)
 //! - [`gherkin`] — `.feature` file parser → `ParsedFeature` DTOs
 //! - [`spec`] — permissive `.feature` file loader (multi-Feature,
 //!   stale language directives)
@@ -14,6 +16,7 @@
 
 pub mod cli;
 pub mod error;
+pub mod frontmatter;
 pub mod gherkin;
 pub mod runner;
 pub mod spec;

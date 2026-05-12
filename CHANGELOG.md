@@ -103,6 +103,28 @@ any minor or pre-release bump.
   one-off concrete scenarios common in event-sourcing /
   specification-by-example style specs.
 
+### Added (CLI)
+
+- `serval run <path>` subcommand: first end-to-end execution
+  path. Reads a `.feature` file (optionally with YAML
+  frontmatter), parses it via `spec::parse_relaxed`, and executes
+  every scenario against an HTTP target with `TestRunner`. Flags:
+  `--base-url URL` (or `$SERVAL_BASE_URL`, required); `--endpoint`
+  / `--method` (required unless frontmatter provides `api.path` /
+  `api.method`); `--timeout SECS` (default 30); `--json`. Exit
+  codes follow the public contract — `0` all pass, `1` any
+  assertion fails, `2` system / network error, `3` bad input.
+  Output is per-scenario `[PASS] / [FAIL]` lines plus a summary
+  by default, or pretty-printed JSON with `--json`.
+- `src/frontmatter.rs`: optional YAML frontmatter parser for
+  `.feature` files. `Frontmatter { api, implements }` with
+  `ApiFrontmatter { path, method, collection }`. `split(content)`
+  returns `(None, content)` when no `---` opener is present, so
+  files without frontmatter pass through transparently.
+- New deps: `serde_yml = "0.0.12"` (regular, for frontmatter);
+  `assert_cmd = "2"` + `predicates = "3"` (dev, for integration
+  tests that spawn the `serval` binary).
+
 ### Added (spec loader)
 
 - `src/spec.rs`: permissive `.feature` file loader. Two entry
