@@ -96,6 +96,23 @@ any minor or pre-release bump.
   filters correctly when `@foo` sits on the `Rule:` line rather
   than directly on a `Scenario:`.
 
+### Added (spec loader)
+
+- `src/spec.rs`: permissive `.feature` file loader. Two entry
+  points: `spec::load_file(path)` (read + parse) and
+  `spec::parse_relaxed(content)` (parse only). Preprocessing
+  strips `# language:` directives and splits multi-Feature input
+  on each top-level `Feature:` line, then forwards each chunk to
+  the strict `GherkinService::parse`. Returns `Vec<ParsedFeature>`
+  rather than a single feature.
+- `tests/fixtures/codegen_export.feature` +
+  `tests/spec_loader.rs`: synthetic regression test verifying the
+  preprocessor handles multi-Feature files plus a `# language:` /
+  keyword-set mismatch in one shot, and that Rule-level tag
+  propagation (from the Fixed section above) survives the chunk
+  split. Fixture is structural-only — real `.feature` specs live
+  in user repos under `specs/`, not in this crate.
+
 ### Excluded by design
 
 - Web-app and multi-user deps inherited from `serval-run-v2` are

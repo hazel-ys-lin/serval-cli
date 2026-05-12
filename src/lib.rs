@@ -8,9 +8,12 @@
 //! external callers can compose them:
 //! - [`error`] — `Error` enum + `Result` alias mapped to CLI exit codes
 //! - [`gherkin`] — `.feature` file parser → `ParsedFeature` DTOs
+//! - [`spec`] — permissive `.feature` file loader (multi-Feature,
+//!   stale language directives)
 //! - [`runner`] — async HTTP test runner consuming parsed scenarios
 
 pub mod cli;
 pub mod error;
 pub mod gherkin;
 pub mod runner;
+pub mod spec;
