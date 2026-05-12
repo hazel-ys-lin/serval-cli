@@ -11,6 +11,18 @@ any minor or pre-release bump.
 
 ### Added
 
+- **Phase 2.4** — `Then` step doc-string drives `expected_body`.
+  New built-in pattern `AssertBodyMatches` parses a triple-quoted
+  block on a `Then` step as JSON and runs a deep partial match
+  against the response body (via the existing `json_contains`).
+  New built-in patterns `SetRequestBodyFromDocString` (Given /
+  When) replace the pre-2.4 unconditional doc-string-to-request-body
+  parse — same semantics for Given / When, fixed semantics for
+  Then.
+- TOML schema: `type = "set_request_body_from_doc_string"` and
+  `type = "assert_body_matches"` for user patterns.
+- `patterns::substitute_placeholders` is now a `pub fn` reused
+  by both the runner and pattern actions.
 - **Phase 2.3** — multi-step state machine in the runner. A
   scenario can now fire multiple HTTP requests via `Action::HttpRequest`
   patterns, each recorded as an `HttpResponse` entry on the
@@ -25,6 +37,12 @@ any minor or pre-release bump.
 
 ### Changed
 
+- `runner::process_step` no longer parses doc strings
+  unconditionally into `request_body`. The behaviour is now
+  driven by built-in patterns (see Phase 2.4 above). This is a
+  fix: previously a `Then ... <doc string>` would silently
+  pollute `request_body`, which then leaked into the implicit
+  end-of-scenario request in single-step specs.
 - `runner::StepContext` renamed to `ScenarioContext` (the state
   is scenario-wide, not per-step) and grew a
   `responses: Vec<HttpResponse>` field.
@@ -38,6 +56,13 @@ any minor or pre-release bump.
   the pre-2.3 single-request behaviour driven by the frontmatter
   `api.path` / `api.method` (or `--endpoint` / `--method`), so
   existing `.feature` files keep working unchanged.
+
+### Removed
+
+- `TestRunner::substitute_placeholders` method. Use
+  `patterns::substitute_placeholders` directly. Breaking only
+  for external callers; the only in-tree callsites were inside
+  `runner.rs` itself.
 
 ## [0.3.1] - 2026-05-12
 

@@ -262,25 +262,18 @@ impl TestRunner {
         env: &EnvSpec,
         example_data: &serde_json::Value,
     ) -> Result<()> {
-        let text = self.substitute_placeholders(&step.text, example_data);
-
-        // Doc string: always attempt to parse as JSON → request body.
-        // (Pattern engine handles text-driven extraction only; this
-        // structural rule lives outside the pattern table.)
-        if let Some(doc_str) = &step.doc_string {
-            let substituted_doc = self.substitute_placeholders(doc_str, example_data);
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&substituted_doc) {
-                context.request_body = Some(json);
-            }
-        }
+        let text = patterns::substitute_placeholders(&step.text, example_data);
 
         // Data table: stash as setup data for later assertions.
+        // (Doc strings are now pattern-driven via
+        // `SetRequestBodyFromDocString` / `AssertBodyMatches`; data
+        // tables stay here because they have no pattern action yet.)
         if let Some(table_data) = &step.data_table {
             let processed_table: Vec<serde_json::Value> = table_data
                 .iter()
                 .map(|row| {
                     let row_str = row.to_string();
-                    let substituted = self.substitute_placeholders(&row_str, example_data);
+                    let substituted = patterns::substitute_placeholders(&row_str, example_data);
                     serde_json::from_str(&substituted).unwrap_or(row.clone())
                 })
                 .collect();
@@ -288,7 +281,8 @@ impl TestRunner {
         }
 
         // Text-driven actions: status codes, headers, query params,
-        // body cues, HTTP firing. Pattern engine handles all of it.
+        // body cues, HTTP firing, doc-string body / assertion.
+        // Pattern engine handles all of it.
         patterns::apply(
             &self.patterns,
             step,
@@ -301,25 +295,6 @@ impl TestRunner {
         .await
     }
 
-    fn substitute_placeholders(&self, text: &str, example_data: &serde_json::Value) -> String {
-        let mut result = text.to_string();
-
-        if let Some(obj) = example_data.as_object() {
-            for (key, value) in obj {
-                let placeholder = format!("<{key}>");
-                let replacement = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    _ => value.to_string(),
-                };
-                result = result.replace(&placeholder, &replacement);
-            }
-        }
-
-        result
-    }
-
     fn build_request_body(
         &self,
         context: &ScenarioContext,
@@ -327,7 +302,7 @@ impl TestRunner {
     ) -> Option<serde_json::Value> {
         if let Some(body) = &context.request_body {
             let body_str = body.to_string();
-            let substituted = self.substitute_placeholders(&body_str, example_data);
+            let substituted = patterns::substitute_placeholders(&body_str, example_data);
             serde_json::from_str(&substituted).ok()
         } else if !example_data.is_null() && example_data.is_object() {
             let mut body = example_data.clone();
@@ -349,7 +324,7 @@ impl TestRunner {
         context: &ScenarioContext,
         example_data: &serde_json::Value,
     ) -> Result<HttpResponse> {
-        let endpoint = self.substitute_placeholders(&api.endpoint, example_data);
+        let endpoint = patterns::substitute_placeholders(&api.endpoint, example_data);
         let mut url = format!("{}{}", env.base_url.trim_end_matches('/'), endpoint);
 
         if !context.query_params.is_empty() {
@@ -474,20 +449,9 @@ impl TestRunner {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_substitute_placeholders() {
-        let runner = TestRunner::new().unwrap();
-        let example = serde_json::json!({
-            "email": "test@example.com",
-            "password": "secret123"
-        });
-
-        let result =
-            runner.substitute_placeholders("user <email> with password <password>", &example);
-        assert_eq!(result, "user test@example.com with password secret123");
-    }
-
-    // Note: status-code extraction is now covered by
+    // Note: `substitute_placeholders` lives in `patterns` and is
+    // covered by `patterns::tests::substitute_placeholders_*`.
+    // Status-code extraction is covered by
     // `patterns::tests::status_pattern_picks_first_in_range_number`.
 
     #[test]

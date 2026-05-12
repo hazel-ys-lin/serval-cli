@@ -97,6 +97,18 @@ pub enum Action {
     /// body.
     SetRequestBodyFromTextOrExampleData,
 
+    /// Parse the step's doc-string as JSON and assign to
+    /// `request_body`. No-op when the step has no doc-string or it
+    /// fails to parse as JSON. Used by built-in `Given` / `When`
+    /// patterns to drive request payloads from triple-quoted blocks.
+    SetRequestBodyFromDocString,
+
+    /// Parse the step's doc-string as JSON and assign to
+    /// `expected_body`, which is then deep-matched against the
+    /// response body at end-of-scenario. No-op when no doc-string or
+    /// parsing fails. Used by the built-in `Then` pattern.
+    AssertBodyMatches,
+
     /// Fire an HTTP request and append the response to
     /// [`ScenarioContext::responses`]. `endpoint_template` may
     /// reference named regex capture groups from the matching
@@ -115,6 +127,27 @@ pub struct StepPattern {
     /// only fires for matching `Given` / `When` / `Then`.
     pub keyword_type: Option<KeywordType>,
     pub action: Action,
+}
+
+/// Replace `<key>` placeholders in `text` with values from
+/// `example_data`. Shared between the runner (step text / endpoint
+/// substitution) and pattern actions (doc-string body / assertion
+/// JSON).
+pub fn substitute_placeholders(text: &str, example_data: &Value) -> String {
+    let mut result = text.to_string();
+    if let Some(obj) = example_data.as_object() {
+        for (key, value) in obj {
+            let placeholder = format!("<{key}>");
+            let replacement = match value {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => value.to_string(),
+            };
+            result = result.replace(&placeholder, &replacement);
+        }
+    }
+    result
 }
 
 /// Resolve the user `patterns.toml` path. Resolution order:
@@ -173,6 +206,8 @@ enum TomlAction {
     SetHeaderFromWordScan,
     SetQueryParamFromWordScan,
     SetRequestBodyFromTextOrExampleData,
+    SetRequestBodyFromDocString,
+    AssertBodyMatches,
     HttpRequest {
         method: String,
         endpoint_template: String,
@@ -211,6 +246,8 @@ fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
         TomlAction::SetRequestBodyFromTextOrExampleData => {
             Action::SetRequestBodyFromTextOrExampleData
         }
+        TomlAction::SetRequestBodyFromDocString => Action::SetRequestBodyFromDocString,
+        TomlAction::AssertBodyMatches => Action::AssertBodyMatches,
         TomlAction::HttpRequest {
             method,
             endpoint_template,
@@ -270,6 +307,22 @@ pub fn builtin_patterns() -> Vec<StepPattern> {
             None,
             Action::SetQueryParamFromWordScan,
         ),
+        // Doc-string body for Given / When: ordered before the
+        // text/example-data fallback so a triple-quoted block always
+        // wins over inline JSON or row data.
+        mk(
+            "^",
+            Some(KeywordType::Context),
+            Action::SetRequestBodyFromDocString,
+        ),
+        mk(
+            "^",
+            Some(KeywordType::Action),
+            Action::SetRequestBodyFromDocString,
+        ),
+        // Doc-string deep-match for Then: parses the triple-quoted
+        // block into `expected_body` for end-of-scenario validation.
+        mk("^", Some(KeywordType::Outcome), Action::AssertBodyMatches),
         // Body cue fallback for steps that announce a body but did
         // not provide a doc string.
         mk(
@@ -353,7 +406,7 @@ async fn execute_action(
             .await
         }
         other => {
-            execute_sync_action(other, text, context, example_data);
+            execute_sync_action(other, text, step, context, example_data);
             Ok(())
         }
     }
@@ -362,6 +415,7 @@ async fn execute_action(
 fn execute_sync_action(
     action: &Action,
     text: &str,
+    step: &ParsedStep,
     context: &mut ScenarioContext,
     example_data: &Value,
 ) {
@@ -394,6 +448,22 @@ fn execute_sync_action(
             }
             if !example_data.is_null() && example_data.is_object() {
                 context.request_body = Some(example_data.clone());
+            }
+        }
+        Action::SetRequestBodyFromDocString => {
+            if let Some(doc) = &step.doc_string {
+                let substituted = substitute_placeholders(doc, example_data);
+                if let Ok(json) = serde_json::from_str::<Value>(&substituted) {
+                    context.request_body = Some(json);
+                }
+            }
+        }
+        Action::AssertBodyMatches => {
+            if let Some(doc) = &step.doc_string {
+                let substituted = substitute_placeholders(doc, example_data);
+                if let Ok(json) = serde_json::from_str::<Value>(&substituted) {
+                    context.expected_body = Some(json);
+                }
             }
         }
         Action::HttpRequest { .. } => {
@@ -662,6 +732,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn doc_string_on_when_step_sets_request_body() {
+        let patterns = builtin_patterns();
+        let mut step = action_step("I POST /users");
+        step.doc_string = Some(r#"{"email": "alice@example.com"}"#.to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.request_body,
+            Some(serde_json::json!({"email": "alice@example.com"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn doc_string_on_then_step_sets_expected_body_not_request_body() {
+        let patterns = builtin_patterns();
+        let mut step = outcome_step("the response is");
+        step.doc_string = Some(r#"{"id": 1, "name": "alice"}"#.to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.expected_body,
+            Some(serde_json::json!({"id": 1, "name": "alice"}))
+        );
+        assert!(
+            ctx.request_body.is_none(),
+            "Then doc string should not pollute request_body"
+        );
+    }
+
+    #[tokio::test]
+    async fn doc_string_substitutes_placeholders_from_example_row() {
+        let patterns = builtin_patterns();
+        let mut step = action_step("I POST /users");
+        step.doc_string = Some(r#"{"email": "<email>"}"#.to_string());
+        let mut ctx = ScenarioContext::default();
+        let example = serde_json::json!({"email": "bob@example.com"});
+        apply_sync_only(&patterns, &step, &mut ctx, &example).await;
+        assert_eq!(
+            ctx.request_body,
+            Some(serde_json::json!({"email": "bob@example.com"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn doc_string_non_json_is_silently_ignored() {
+        let patterns = builtin_patterns();
+        let mut step = action_step("I POST /users");
+        step.doc_string = Some("not json at all".to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert!(ctx.request_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_doc_string_means_doc_actions_no_op() {
+        let patterns = builtin_patterns();
+        let step = outcome_step("status should be 200");
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        // status pattern still fires
+        assert_eq!(ctx.expected_status, Some(200));
+        // but no doc string → no expected_body
+        assert!(ctx.expected_body.is_none());
+    }
+
+    #[tokio::test]
     async fn body_cue_does_not_overwrite_existing_body() {
         let patterns = builtin_patterns();
         let step = action_step("I POST /users with body");
@@ -676,6 +812,29 @@ mod tests {
     }
 
     // ---- ValueSource + endpoint template helpers ----
+
+    #[test]
+    fn substitute_placeholders_replaces_angle_bracket_keys() {
+        let example = serde_json::json!({
+            "email": "test@example.com",
+            "password": "secret123"
+        });
+        let out = substitute_placeholders("user <email> with password <password>", &example);
+        assert_eq!(out, "user test@example.com with password secret123");
+    }
+
+    #[test]
+    fn substitute_placeholders_leaves_unknown_keys_intact() {
+        let example = serde_json::json!({"a": 1});
+        let out = substitute_placeholders("hi <b>", &example);
+        assert_eq!(out, "hi <b>");
+    }
+
+    #[test]
+    fn substitute_placeholders_null_example_passes_through() {
+        let out = substitute_placeholders("hello <name>", &Value::Null);
+        assert_eq!(out, "hello <name>");
+    }
 
     #[test]
     fn endpoint_template_substitutes_named_groups() {
@@ -829,14 +988,29 @@ regex = '\bF\b'
 type = "http_request"
 method = "POST"
 endpoint_template = "/x"
+
+[[pattern]]
+regex = '\bG\b'
+[pattern.action]
+type = "set_request_body_from_doc_string"
+
+[[pattern]]
+regex = '\bH\b'
+[pattern.action]
+type = "assert_body_matches"
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
-        assert_eq!(patterns.len(), 6);
+        assert_eq!(patterns.len(), 8);
         assert!(matches!(
             patterns[5].action,
             Action::HttpRequest { ref method, .. } if method == "POST"
         ));
+        assert!(matches!(
+            patterns[6].action,
+            Action::SetRequestBodyFromDocString
+        ));
+        assert!(matches!(patterns[7].action, Action::AssertBodyMatches));
     }
 
     #[test]

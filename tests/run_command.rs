@@ -312,6 +312,87 @@ endpoint_template = "/users/{{name}}"
 }
 
 #[test]
+fn run_then_doc_string_deep_matches_response_body() {
+    // Phase 2.4: a `Then` step with a doc string parses the doc
+    // string as JSON into `expected_body` and runs a deep partial
+    // match against the response body. The mock returns more fields
+    // than the assertion lists; the test still passes because
+    // `json_contains` is partial-match.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/users/1");
+        then.status(200)
+            .json_body(json!({"id": 1, "name": "alice", "email": "a@b.c"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let feature_path = tmp.path().join("body_match.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Body match\n  Scenario: alice profile\n    When I GET /users/1\n    Then the response is:\n      \"\"\"\n      {\"id\": 1, \"name\": \"alice\"}\n      \"\"\"\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/users/1",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
+}
+
+#[test]
+fn run_then_doc_string_mismatch_fails() {
+    // Response body does not match the doc-string spec → exit 1
+    // with `Response body does not match expected` in the [FAIL]
+    // line. Proves the new pattern actually drives validation,
+    // not just sets state.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/users/1");
+        then.status(200).json_body(json!({"id": 2, "name": "bob"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let feature_path = tmp.path().join("body_mismatch.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Body mismatch\n  Scenario: expects alice\n    When I GET /users/1\n    Then the response is:\n      \"\"\"\n      {\"id\": 1, \"name\": \"alice\"}\n      \"\"\"\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/users/1",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains(
+            "Response body does not match expected",
+        ));
+}
+
+#[test]
 fn run_exits_3_when_no_base_url_nor_env_resolves() {
     // Config file with no entries — neither --base-url nor --env
     // can resolve a target.
