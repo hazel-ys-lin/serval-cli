@@ -136,6 +136,27 @@ any minor or pre-release bump.
   `--json`, it goes to stderr so stdout stays pure JSON. New
   module `src/report.rs`. New dev-dep `tempfile = "3"` for
   isolated integration tests.
+- `serval history` subcommand: list past run reports under
+  `.serval/reports/` (or `--report-dir <path>`) sorted by
+  `started_at` descending. `--limit N` caps output (default 20);
+  `--json` emits a JSON array with `id` / `started_at` /
+  `finished_at` / `source_file` / `target` / `summary` per
+  entry. Empty directory prints `no reports found`.
+- `serval diff <before> <after>` subcommand: compare two run
+  reports. IDs accept exact filename (without `.json`), unique
+  prefix, or the keywords `latest` / `previous`. Surfaces
+  scenario flips (PASS↔FAIL with status code delta), added /
+  removed scenarios, plus `source_file` / `target` change
+  warnings and per-side summary counts. `--json` emits a tagged
+  `ScenarioChange` enum (`flipped` / `added` / `removed`)
+  alongside `before_id`, `after_id`, `source_changed`,
+  `target_changed`, `summary_before`, `summary_after`. Exits 3
+  on ambiguous prefixes or missing IDs.
+- `src/report.rs` gains `ReportRecord`, `read(path)`,
+  `list(dir)`, and `resolve(dir, id)` for the new subcommands to
+  consume (inline tests cover sort order, prefix matching,
+  ambiguous-prefix errors, and the `latest` / `previous`
+  keywords).
 - `src/frontmatter.rs`: optional YAML frontmatter parser for
   `.feature` files. `Frontmatter { api, implements }` with
   `ApiFrontmatter { path, method, collection }`. `split(content)`

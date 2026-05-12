@@ -92,6 +92,114 @@ fn filename(t: time::OffsetDateTime) -> String {
     format!("{}.json", stamp.replace(':', "-"))
 }
 
+/// A report on disk plus the id used to reference it (the filename
+/// with `.json` stripped).
+#[derive(Debug, Clone)]
+pub struct ReportRecord {
+    pub id: String,
+    pub report: RunReport,
+}
+
+/// Read a single JSON report file into a [`RunReport`].
+pub fn read(path: &Path) -> Result<RunReport> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| Error::System(format!("read report {}: {e}", path.display())))?;
+    serde_json::from_str(&content)
+        .map_err(|e| Error::Spec(format!("malformed report {}: {e}", path.display())))
+}
+
+/// List every `*.json` report under `dir` that deserializes
+/// successfully, sorted by `started_at` descending (newest first).
+/// Missing directory returns an empty list rather than an error.
+pub fn list(dir: &Path) -> Result<Vec<ReportRecord>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let read_dir = std::fs::read_dir(dir)
+        .map_err(|e| Error::System(format!("read dir {}: {e}", dir.display())))?;
+    for entry in read_dir {
+        let entry = entry.map_err(|e| Error::System(format!("read dir entry: {e}")))?;
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(report) = read(&path) else { continue };
+        let id = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push(ReportRecord { id, report });
+    }
+    out.sort_by_key(|r| std::cmp::Reverse(r.report.started_at));
+    Ok(out)
+}
+
+/// Resolve a user-supplied id to a single [`ReportRecord`]. Accepts:
+/// - exact filename without `.json` extension
+/// - unique prefix of an existing filename
+/// - keyword `latest` (newest report by `started_at`)
+/// - keyword `previous` (second-newest)
+pub fn resolve(dir: &Path, id: &str) -> Result<ReportRecord> {
+    if id == "latest" || id == "previous" {
+        let mut records = list(dir)?;
+        let index = if id == "latest" { 0 } else { 1 };
+        if records.len() > index {
+            return Ok(records.swap_remove(index));
+        }
+        return Err(Error::Spec(format!(
+            "no report at position {id} (have {} report(s))",
+            records.len()
+        )));
+    }
+
+    let exact = dir.join(format!("{id}.json"));
+    if exact.exists() {
+        let report = read(&exact)?;
+        return Ok(ReportRecord {
+            id: id.to_string(),
+            report,
+        });
+    }
+
+    if !dir.exists() {
+        return Err(Error::Spec(format!(
+            "no reports directory at {}",
+            dir.display()
+        )));
+    }
+
+    let read_dir = std::fs::read_dir(dir)
+        .map_err(|e| Error::System(format!("read dir {}: {e}", dir.display())))?;
+    let mut matches: Vec<PathBuf> = read_dir
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(id) && name.ends_with(".json")
+        })
+        .map(|e| e.path())
+        .collect();
+
+    match matches.len() {
+        0 => Err(Error::Spec(format!("no report matches id {id:?}"))),
+        1 => {
+            let path = matches.remove(0);
+            let report = read(&path)?;
+            let resolved_id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(ReportRecord {
+                id: resolved_id,
+                report,
+            })
+        }
+        n => Err(Error::Spec(format!(
+            "ambiguous id {id:?} matches {n} reports"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +268,101 @@ mod tests {
         let parsed: RunReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.schema_version, SCHEMA_VERSION);
         assert_eq!(parsed.target.endpoint, "/");
+    }
+
+    fn report_at(seconds: i64) -> RunReport {
+        let mut r = mk_report();
+        let t = time::OffsetDateTime::from_unix_timestamp(seconds).unwrap();
+        r.started_at = t;
+        r.finished_at = t;
+        r
+    }
+
+    fn write_named(dir: &Path, id: &str, report: &RunReport) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("{id}.json"));
+        std::fs::write(&path, serde_json::to_string_pretty(report).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn list_returns_empty_when_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let records = list(&missing).expect("missing dir should be empty, not error");
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn list_sorts_by_started_at_descending() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "alpha", &report_at(1_000_000_000));
+        write_named(tmp.path(), "beta", &report_at(2_000_000_000));
+        write_named(tmp.path(), "gamma", &report_at(1_500_000_000));
+
+        let records = list(tmp.path()).expect("list");
+        let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["beta", "gamma", "alpha"]);
+    }
+
+    #[test]
+    fn list_skips_non_json_and_malformed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "good", &report_at(1_000_000_000));
+        std::fs::write(tmp.path().join("not-a-report.json"), "{ not json").unwrap();
+        std::fs::write(tmp.path().join("readme.txt"), "not even json").unwrap();
+
+        let records = list(tmp.path()).expect("list");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "good");
+    }
+
+    #[test]
+    fn resolve_exact_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "abc123", &report_at(1_000_000_000));
+        let rec = resolve(tmp.path(), "abc123").expect("resolve");
+        assert_eq!(rec.id, "abc123");
+    }
+
+    #[test]
+    fn resolve_unique_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "2026-05-12T03-30", &report_at(1_000_000_000));
+        write_named(tmp.path(), "2026-05-13T11-22", &report_at(2_000_000_000));
+        let rec = resolve(tmp.path(), "2026-05-12").expect("unique prefix");
+        assert_eq!(rec.id, "2026-05-12T03-30");
+    }
+
+    #[test]
+    fn resolve_ambiguous_prefix_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "2026-05-12T03-30", &report_at(1_000_000_000));
+        write_named(tmp.path(), "2026-05-12T11-22", &report_at(2_000_000_000));
+        let err = resolve(tmp.path(), "2026-05-12").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "got {msg}");
+    }
+
+    #[test]
+    fn resolve_latest_and_previous_keywords() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "older", &report_at(1_000_000_000));
+        write_named(tmp.path(), "newer", &report_at(2_000_000_000));
+
+        let latest = resolve(tmp.path(), "latest").expect("latest");
+        assert_eq!(latest.id, "newer");
+
+        let previous = resolve(tmp.path(), "previous").expect("previous");
+        assert_eq!(previous.id, "older");
+    }
+
+    #[test]
+    fn resolve_no_match_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_named(tmp.path(), "abc", &report_at(1_000_000_000));
+        let err = resolve(tmp.path(), "zzz").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no report matches"), "got {msg}");
     }
 }

@@ -8,6 +8,10 @@
 //! - `serval status [--server URL] [--json]` — hit `/health`
 //! - `serval run <path> --base-url URL [--endpoint P] [--method M] [--json]`
 //!   — execute a `.feature` file against an HTTP target
+//! - `serval history [--limit N] [--report-dir DIR] [--json]` — list
+//!   past run reports under `.serval/reports/`
+//! - `serval diff <before-id> <after-id> [--report-dir DIR] [--json]`
+//!   — compare two run reports
 //!
 //! Exit codes are documented in [`exit`].
 
@@ -44,6 +48,12 @@ enum Command {
 
     /// Execute a `.feature` file against an HTTP target.
     Run(commands::run::RunArgs),
+
+    /// List past run reports under `.serval/reports/`.
+    History(commands::history::HistoryArgs),
+
+    /// Compare two run reports.
+    Diff(commands::diff::DiffArgs),
 }
 
 /// Parse the given argv and run the matching subcommand.
@@ -72,5 +82,7 @@ where
     match cli.command {
         Command::Status(args) => commands::status::run(args, format),
         Command::Run(args) => commands::run::run(args, format),
+        Command::History(args) => commands::history::run(args, format),
+        Command::Diff(args) => commands::diff::run(args, format),
     }
 }
