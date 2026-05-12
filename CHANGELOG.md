@@ -152,6 +152,30 @@ any minor or pre-release bump.
   alongside `before_id`, `after_id`, `source_changed`,
   `target_changed`, `summary_before`, `summary_after`. Exits 3
   on ambiguous prefixes or missing IDs.
+- `serval api {list, show <pattern>, find <query>}` subcommands:
+  inspect `.feature` specs on disk. Default scan directory is
+  `specs/` in the cwd; override with `--dir <path>`.
+  - `list` shows every spec carrying YAML frontmatter with
+    `api.{path,method}`, plus a scanned-count footer. Specs
+    without frontmatter are intentionally omitted (known
+    follow-up tracked in memory).
+  - `show <pattern>` renders one spec's detail (api block,
+    `implements`, features, scenarios). Pattern is a
+    case-insensitive substring matched against `api.path`,
+    `api.method`, `api.collection`, file path, feature name, or
+    scenario tag. Multiple matches list candidates and exit 3;
+    no match exits 3.
+  - `find <query>` lists all matching API specs using the same
+    substring rules — `find post`, `find @happy-path`,
+    `find users` all work.
+  - `--json` emits machine-readable shapes for each subcommand
+    (`list` / `find` → array; `show` → object with nested
+    `features`).
+- `src/spec.rs` gains `SpecRecord { path, frontmatter, features }`
+  + helper methods (`api()`, `scenario_count()`, `unique_tags()`)
+  + `discover(dir)` that walks `.feature` files recursively and
+  loads each. Five new inline tests cover sub-directory walking,
+  frontmatter extraction, missing-dir handling, and tag dedup.
 - `src/report.rs` gains `ReportRecord`, `read(path)`,
   `list(dir)`, and `resolve(dir, id)` for the new subcommands to
   consume (inline tests cover sort order, prefix matching,

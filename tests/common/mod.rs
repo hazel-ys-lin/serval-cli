@@ -48,3 +48,14 @@ pub fn write_report(dir: &Path, id: &str, report: &RunReport) -> PathBuf {
     std::fs::write(&path, json).unwrap();
     path
 }
+
+/// Write a `.feature` file under `dir/<rel>`, creating any
+/// intermediate directories. Returns the absolute path written.
+pub fn write_feature(dir: &Path, rel: &str, content: &str) -> PathBuf {
+    let path = dir.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, content).unwrap();
+    path
+}

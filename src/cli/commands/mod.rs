@@ -5,6 +5,7 @@
 //! decides on. Subcommands are wired into the top-level dispatcher in
 //! [`crate::cli`].
 
+pub mod api;
 pub mod diff;
 pub mod history;
 pub mod run;

@@ -12,6 +12,8 @@
 //!   past run reports under `.serval/reports/`
 //! - `serval diff <before-id> <after-id> [--report-dir DIR] [--json]`
 //!   — compare two run reports
+//! - `serval api {list, show <pattern>, find <query>} [--dir DIR]
+//!   [--json]` — inspect `.feature` specs with API frontmatter
 //!
 //! Exit codes are documented in [`exit`].
 
@@ -54,6 +56,9 @@ enum Command {
 
     /// Compare two run reports.
     Diff(commands::diff::DiffArgs),
+
+    /// Inspect `.feature` specs on disk (list / show / find).
+    Api(commands::api::ApiArgs),
 }
 
 /// Parse the given argv and run the matching subcommand.
@@ -84,5 +89,6 @@ where
         Command::Run(args) => commands::run::run(args, format),
         Command::History(args) => commands::history::run(args, format),
         Command::Diff(args) => commands::diff::run(args, format),
+        Command::Api(args) => commands::api::run(args, format),
     }
 }
