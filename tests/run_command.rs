@@ -181,6 +181,62 @@ fn run_resolves_env_base_url_from_config_file() {
 }
 
 #[test]
+fn run_loads_user_patterns_from_file() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/x");
+        then.status(500);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // User pattern adds a trigger for "the answer is N" that runs the
+    // built-in status-scan action. Without this pattern, "the answer
+    // is 200" doesn't match any built-in pattern, so the scenario
+    // would pass vacuously against the 500 response. With it, the
+    // action fires, scans for "200", asserts against the actual 500
+    // response, and the scenario fails.
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        r#"
+[[pattern]]
+regex = '(?i)the answer is\s+\d{3}'
+keyword_type = "Outcome"
+[pattern.action]
+type = "assert_status_from_text_scan"
+"#,
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("smoke.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: User pattern smoke\n  Scenario: custom assertion\n    When I GET /x\n    Then the answer is 200\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/x",
+            "--method",
+            "GET",
+            "--no-report",
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("Expected status 200, got 500"));
+}
+
+#[test]
 fn run_exits_3_when_no_base_url_nor_env_resolves() {
     // Config file with no entries — neither --base-url nor --env
     // can resolve a target.

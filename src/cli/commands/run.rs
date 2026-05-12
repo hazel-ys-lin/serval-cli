@@ -27,6 +27,7 @@ use crate::cli::output::OutputFormat;
 use crate::config;
 use crate::error::{Error, Result};
 use crate::frontmatter::{self, Frontmatter};
+use crate::patterns;
 use crate::report::{self, RunReport, RunSummary, TargetRef};
 use crate::runner::{ApiSpec, EnvSpec, TestConfig, TestResult, TestRunner};
 use crate::spec;
@@ -79,6 +80,12 @@ pub struct RunArgs {
     /// Skip writing the JSON run report file.
     #[arg(long)]
     pub no_report: bool,
+
+    /// Path to a user `patterns.toml` extending the built-in step
+    /// pattern table. Falls back to `$SERVAL_PATTERNS_FILE`, then to
+    /// `~/.serval/patterns.toml` if it exists.
+    #[arg(long, env = "SERVAL_PATTERNS_FILE")]
+    pub patterns_file: Option<PathBuf>,
 }
 
 pub fn run(args: RunArgs, format: OutputFormat) -> i32 {
@@ -122,10 +129,12 @@ fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
         .build()
         .map_err(|e| Error::System(format!("tokio runtime: {e}")))?;
 
+    let user_patterns = load_user_patterns(args.patterns_file.as_deref())?;
     let runner = TestRunner::with_config(TestConfig {
         timeout: Duration::from_secs(args.timeout),
         ..Default::default()
-    })?;
+    })?
+    .extend_patterns(user_patterns);
 
     let all_results = runtime.block_on(async {
         let mut all = Vec::new();
@@ -186,6 +195,18 @@ fn build_report(
         summary: RunSummary::from_results(results),
         results: results.to_vec(),
     }
+}
+
+fn load_user_patterns(explicit: Option<&std::path::Path>) -> Result<Vec<patterns::StepPattern>> {
+    let path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => match patterns::default_path() {
+            Ok(p) if p.exists() => p,
+            // Silent no-op when there's no default location yet.
+            _ => return Ok(Vec::new()),
+        },
+    };
+    patterns::load_from_file(&path)
 }
 
 fn resolve_base_url(args: &RunArgs) -> Result<String> {

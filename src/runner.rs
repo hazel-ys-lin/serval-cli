@@ -107,6 +107,15 @@ impl TestRunner {
         })
     }
 
+    /// Append additional patterns after the built-in ones. User-loaded
+    /// patterns (from `~/.serval/patterns.toml` or `--patterns-file`)
+    /// flow through here; both built-in and user patterns can match a
+    /// single step.
+    pub fn extend_patterns(mut self, extra: Vec<StepPattern>) -> Self {
+        self.patterns.extend(extra);
+        self
+    }
+
     /// Run every example in `scenario` against `api` on `env`.
     ///
     /// Concrete scenarios — those with `Given/When/Then` steps but no
