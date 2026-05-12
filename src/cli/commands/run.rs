@@ -24,6 +24,7 @@ use clap::Args;
 
 use crate::cli::exit;
 use crate::cli::output::OutputFormat;
+use crate::config;
 use crate::error::{Error, Result};
 use crate::frontmatter::{self, Frontmatter};
 use crate::report::{self, RunReport, RunSummary, TargetRef};
@@ -37,9 +38,22 @@ pub struct RunArgs {
     pub path: PathBuf,
 
     /// Base URL of the target server (e.g. `http://localhost:3000`).
-    /// Falls back to `$SERVAL_BASE_URL`.
+    /// Falls back to `$SERVAL_BASE_URL`. If neither this flag nor
+    /// `--env` resolves a URL, `default_env` from the config file is
+    /// consulted; missing all of them is an exit-3 error.
     #[arg(long, env = "SERVAL_BASE_URL")]
-    pub base_url: String,
+    pub base_url: Option<String>,
+
+    /// Named environment from the user's config file (default
+    /// `~/.serval/config.toml`). Resolves to the env's `base_url`
+    /// when `--base-url` is not supplied.
+    #[arg(long)]
+    pub env: Option<String>,
+
+    /// Override the config file path (defaults to
+    /// `$SERVAL_CONFIG_FILE` or `~/.serval/config.toml`).
+    #[arg(long)]
+    pub config_file: Option<PathBuf>,
 
     /// API path on the target server (e.g. `/api/users`). Required
     /// when the `.feature` file has no frontmatter providing
@@ -93,11 +107,12 @@ fn map_error_to_exit(e: &Error) -> i32 {
 fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
     let started_at = time::OffsetDateTime::now_utc();
 
+    let base_url = resolve_base_url(&args)?;
     let raw = std::fs::read_to_string(&args.path)?;
     let (fm, body) = frontmatter::split(&raw)?;
     let api = resolve_api_spec(&fm, &args)?;
     let env = EnvSpec {
-        base_url: args.base_url.clone(),
+        base_url: base_url.clone(),
     };
 
     let features = spec::parse_relaxed(body)?;
@@ -171,6 +186,30 @@ fn build_report(
         summary: RunSummary::from_results(results),
         results: results.to_vec(),
     }
+}
+
+fn resolve_base_url(args: &RunArgs) -> Result<String> {
+    if let Some(u) = &args.base_url {
+        return Ok(u.clone());
+    }
+    let path = match &args.config_file {
+        Some(p) => p.clone(),
+        None => config::default_path()?,
+    };
+    let cfg = config::load(&path)?;
+    if let Some((_name, env)) = cfg.resolve_env(args.env.as_deref()) {
+        return Ok(env.base_url.clone());
+    }
+    let hint = match &args.env {
+        Some(name) => format!("env {name:?} not found in {}", path.display()),
+        None => format!(
+            "no `--base-url`, no `--env`, no `default_env` in {}",
+            path.display()
+        ),
+    };
+    Err(Error::Spec(format!(
+        "could not resolve target server: {hint}. Pass `--base-url URL` or `--env NAME`, or `serval env set NAME --base-url URL --make-default`."
+    )))
 }
 
 fn resolve_api_spec(fm: &Option<Frontmatter>, args: &RunArgs) -> Result<ApiSpec> {

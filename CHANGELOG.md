@@ -176,6 +176,30 @@ any minor or pre-release bump.
   + `discover(dir)` that walks `.feature` files recursively and
   loads each. Five new inline tests cover sub-directory walking,
   frontmatter extraction, missing-dir handling, and tag dedup.
+- `serval env {list, show, set, remove}` subcommands manage named
+  environments in `~/.serval/config.toml` (override with
+  `--config-file <path>` or `$SERVAL_CONFIG_FILE`). Each env
+  carries a `base_url` (auth tokens / headers deferred). `set`
+  accepts `--make-default` to wire the env to the config's
+  `default_env` field; `remove` clears `default_env` when it
+  pointed at the deleted entry. `list` table marks the default
+  env; `--json` flag emits `[{ name, base_url, is_default }]`.
+- `serval config {path, show}` prints the resolved config file
+  path (handy for `vim "$(serval config path)"`) or the loaded
+  contents (TOML by default, JSON with `--json`).
+- `serval run` gains `--env <name>` and `--config-file <path>`.
+  Base-URL resolution chain: explicit `--base-url` flag wins; if
+  absent, `--env <name>` is looked up in the config; if no `--env`,
+  the config's `default_env` is consulted. Missing all three is
+  an exit-3 error with an actionable message
+  (`serval env set NAME --base-url URL --make-default`).
+- New module `src/config.rs` exposing `Config { default_env, envs
+  }`, `EnvConfig { base_url }`, `default_path()` (uses
+  `$SERVAL_CONFIG_FILE` then `$HOME/.serval/config.toml`),
+  `load(path)` (missing file = empty Config), `save(path, &cfg)`,
+  and `Config::resolve_env(name_or_default)`. Five inline tests
+  cover empty roundtrip, missing-file default, save/load
+  roundtrip, default_env fallback, and unknown-env handling.
 - `src/report.rs` gains `ReportRecord`, `read(path)`,
   `list(dir)`, and `resolve(dir, id)` for the new subcommands to
   consume (inline tests cover sort order, prefix matching,

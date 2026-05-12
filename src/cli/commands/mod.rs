@@ -6,7 +6,9 @@
 //! [`crate::cli`].
 
 pub mod api;
+pub mod config;
 pub mod diff;
+pub mod env;
 pub mod history;
 pub mod run;
 pub mod status;

@@ -7,6 +7,8 @@
 //! Core building blocks live as sibling modules so subcommands and
 //! external callers can compose them:
 //! - [`error`] — `Error` enum + `Result` alias mapped to CLI exit codes
+//! - [`config`] — `~/.serval/config.toml` reader / writer + named
+//!   environment resolution
 //! - [`frontmatter`] — optional YAML frontmatter parser for `.feature`
 //!   files (`api.path` / `api.method` / `collection` / `implements`)
 //! - [`gherkin`] — `.feature` file parser → `ParsedFeature` DTOs
@@ -17,6 +19,7 @@
 //!   `.serval/reports/` after each `serval run`
 
 pub mod cli;
+pub mod config;
 pub mod error;
 pub mod frontmatter;
 pub mod gherkin;

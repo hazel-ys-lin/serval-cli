@@ -6,14 +6,20 @@
 //!
 //! Public surface (v0.x, still growing):
 //! - `serval status [--server URL] [--json]` — hit `/health`
-//! - `serval run <path> --base-url URL [--endpoint P] [--method M] [--json]`
-//!   — execute a `.feature` file against an HTTP target
+//! - `serval run <path> [--base-url URL | --env NAME] [--endpoint P]
+//!   [--method M] [--json]` — execute a `.feature` file against an
+//!   HTTP target
 //! - `serval history [--limit N] [--report-dir DIR] [--json]` — list
 //!   past run reports under `.serval/reports/`
 //! - `serval diff <before-id> <after-id> [--report-dir DIR] [--json]`
 //!   — compare two run reports
 //! - `serval api {list, show <pattern>, find <query>} [--dir DIR]
 //!   [--json]` — inspect `.feature` specs with API frontmatter
+//! - `serval env {list, show NAME, set NAME --base-url URL
+//!   [--make-default], remove NAME} [--config-file PATH] [--json]`
+//!   — manage named environments
+//! - `serval config {path, show} [--config-file PATH] [--json]` —
+//!   show config file location / contents
 //!
 //! Exit codes are documented in [`exit`].
 
@@ -59,6 +65,12 @@ enum Command {
 
     /// Inspect `.feature` specs on disk (list / show / find).
     Api(commands::api::ApiArgs),
+
+    /// Manage named environments in the user's config file.
+    Env(commands::env::EnvArgs),
+
+    /// Show the user's config file location / contents.
+    Config(commands::config::ConfigArgs),
 }
 
 /// Parse the given argv and run the matching subcommand.
@@ -90,5 +102,7 @@ where
         Command::History(args) => commands::history::run(args, format),
         Command::Diff(args) => commands::diff::run(args, format),
         Command::Api(args) => commands::api::run(args, format),
+        Command::Env(args) => commands::env::run(args, format),
+        Command::Config(args) => commands::config::run(args, format),
     }
 }

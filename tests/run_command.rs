@@ -134,3 +134,67 @@ fn run_emits_json_array_with_flag() {
         .stdout(predicate::str::contains("\"pass\": true"))
         .stdout(predicate::str::contains("\"response_status\": 200"));
 }
+
+#[test]
+fn run_resolves_env_base_url_from_config_file() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/health");
+        then.status(200);
+    });
+
+    // Write a config file pointing `local` env at the mock server.
+    let cfg = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "env",
+            "set",
+            "local",
+            "--base-url",
+            &server.base_url(),
+            "--config-file",
+            cfg.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // `serval run --env local` resolves base_url through the config.
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            FX_NO_FM,
+            "--env",
+            "local",
+            "--endpoint",
+            "/health",
+            "--method",
+            "GET",
+            "--config-file",
+            cfg.path().to_str().unwrap(),
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
+}
+
+#[test]
+fn run_exits_3_when_no_base_url_nor_env_resolves() {
+    // Config file with no entries — neither --base-url nor --env
+    // can resolve a target.
+    let cfg = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            FX_NO_FM,
+            "--config-file",
+            cfg.path().to_str().unwrap(),
+            "--no-report",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("could not resolve target server"));
+}
