@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::gherkin::{ParsedExample, ParsedScenario, ParsedStep};
+use crate::patterns::{self, StepPattern};
 
 /// Plain DTO replacing v2's `Api` entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,7 @@ pub struct StepContext {
 pub struct TestRunner {
     client: Client,
     config: TestConfig,
+    patterns: Vec<StepPattern>,
 }
 
 impl TestRunner {
@@ -98,7 +100,11 @@ impl TestRunner {
             .build()
             .map_err(|e| Error::System(format!("Failed to create HTTP client: {e}")))?;
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            patterns: patterns::builtin_patterns(),
+        })
     }
 
     /// Run every example in `scenario` against `api` on `env`.
@@ -196,6 +202,9 @@ impl TestRunner {
     ) {
         let text = self.substitute_placeholders(&step.text, example_data);
 
+        // Doc string: always attempt to parse as JSON → request body.
+        // (Pattern engine handles text-driven extraction only; this
+        // structural rule lives outside the pattern table.)
         if let Some(doc_str) = &step.doc_string {
             let substituted_doc = self.substitute_placeholders(doc_str, example_data);
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&substituted_doc) {
@@ -203,6 +212,7 @@ impl TestRunner {
             }
         }
 
+        // Data table: stash as setup data for later assertions.
         if let Some(table_data) = &step.data_table {
             let processed_table: Vec<serde_json::Value> = table_data
                 .iter()
@@ -215,39 +225,9 @@ impl TestRunner {
             context.setup_data = Some(processed_table);
         }
 
-        if (text.contains("request body")
-            || text.contains("request payload")
-            || text.contains("with body"))
-            && context.request_body.is_none()
-        {
-            if let Some(json_start) = text.find('{') {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text[json_start..]) {
-                    context.request_body = Some(json);
-                }
-            } else {
-                context.request_body = Some(example_data.clone());
-            }
-        }
-
-        if text.contains("header") {
-            self.parse_header(&text, context);
-        }
-
-        if text.contains("query param") || text.contains("query parameter") {
-            self.parse_query_param(&text, context);
-        }
-
-        if step.keyword_type == "Outcome" {
-            if let Some(status) = self.extract_status_code(&text) {
-                context.expected_status = Some(status);
-            }
-
-            if (text.contains("contains") || text.contains("should have"))
-                && let Some(pattern) = self.extract_quoted_string(&text)
-            {
-                context.expected_body_contains.push(pattern);
-            }
-        }
+        // Text-driven actions: status codes, headers, query params,
+        // body cues, … Pattern engine handles all of it.
+        patterns::apply(&self.patterns, step, &text, context, example_data);
     }
 
     fn substitute_placeholders(&self, text: &str, example_data: &serde_json::Value) -> String {
@@ -410,70 +390,6 @@ impl TestRunner {
             _ => actual == expected,
         }
     }
-
-    fn parse_header(&self, text: &str, context: &mut StepContext) {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if let Some(header_idx) = words.iter().position(|&w| w == "header")
-            && let (Some(key), Some(value)) = (words.get(header_idx + 1), words.last())
-        {
-            let key = key.trim_matches(|c| c == '\'' || c == '"');
-            let value = value.trim_matches(|c| c == '\'' || c == '"');
-            context
-                .request_headers
-                .insert(key.to_string(), value.to_string());
-        }
-    }
-
-    fn parse_query_param(&self, text: &str, context: &mut StepContext) {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if let Some(param_idx) = words.iter().position(|&w| w == "param" || w == "parameter")
-            && let (Some(key), Some(value)) = (words.get(param_idx + 1), words.last())
-        {
-            let key = key.trim_matches(|c| c == '\'' || c == '"');
-            let value = value.trim_matches(|c| c == '\'' || c == '"');
-            context
-                .query_params
-                .insert(key.to_string(), value.to_string());
-        }
-    }
-
-    fn extract_status_code(&self, text: &str) -> Option<i16> {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        for (i, word) in words.iter().enumerate() {
-            if let Ok(status) = word.parse::<i16>()
-                && (100..600).contains(&status)
-            {
-                return Some(status);
-            }
-            if (*word == "status" || *word == "code")
-                && let Some(next) = words.get(i + 1)
-                && let Ok(status) = next.parse::<i16>()
-                && (100..600).contains(&status)
-            {
-                return Some(status);
-            }
-        }
-        None
-    }
-
-    fn extract_quoted_string(&self, text: &str) -> Option<String> {
-        let mut in_quote = false;
-        let mut quote_char = '"';
-        let mut result = String::new();
-
-        for c in text.chars() {
-            if !in_quote && (c == '"' || c == '\'') {
-                in_quote = true;
-                quote_char = c;
-            } else if in_quote && c == quote_char {
-                return Some(result);
-            } else if in_quote {
-                result.push(c);
-            }
-        }
-
-        None
-    }
 }
 
 #[cfg(test)]
@@ -493,20 +409,8 @@ mod tests {
         assert_eq!(result, "user test@example.com with password secret123");
     }
 
-    #[test]
-    fn test_extract_status_code() {
-        let runner = TestRunner::new().unwrap();
-
-        assert_eq!(
-            runner.extract_status_code("status should be 200"),
-            Some(200)
-        );
-        assert_eq!(
-            runner.extract_status_code("the status code is 404"),
-            Some(404)
-        );
-        assert_eq!(runner.extract_status_code("expect 500 error"), Some(500));
-    }
+    // Note: status-code extraction is now covered by
+    // `patterns::tests::status_pattern_picks_first_in_range_number`.
 
     #[test]
     fn test_json_contains() {

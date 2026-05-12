@@ -12,6 +12,8 @@
 //! - [`frontmatter`] — optional YAML frontmatter parser for `.feature`
 //!   files (`api.path` / `api.method` / `collection` / `implements`)
 //! - [`gherkin`] — `.feature` file parser → `ParsedFeature` DTOs
+//! - [`patterns`] — step-pattern engine mapping step text to runner
+//!   actions (Phase 2.1+; built-in table only for now)
 //! - [`spec`] — permissive `.feature` file loader (multi-Feature,
 //!   stale language directives)
 //! - [`runner`] — async HTTP test runner consuming parsed scenarios
@@ -23,6 +25,7 @@ pub mod config;
 pub mod error;
 pub mod frontmatter;
 pub mod gherkin;
+pub mod patterns;
 pub mod report;
 pub mod runner;
 pub mod spec;
