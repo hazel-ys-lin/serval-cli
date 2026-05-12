@@ -9,6 +9,31 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-12
+
+Privacy + packaging follow-up to v0.3.0. No `serval` CLI
+behavioural change; first release to ship prebuilt binaries.
+
+### Added
+
+- Prebuilt binary distribution via cargo-dist 0.31.0. Tag pushes
+  trigger `.github/workflows/release.yml`, which cross-builds for
+  four targets (macOS arm64 + x86_64, Linux x86_64 + arm64),
+  packages `.tar.xz` archives with the `serval` binary + LICENSE
+  + README + CHANGELOG, and uploads a
+  `serval-cli-installer.sh` shell installer alongside.
+- README `## Install` section covering the `curl | sh`
+  installer, `cargo install --git`, and manual `.tar.xz`
+  download.
+
+### Changed
+
+- `CLAUDE.md` scrubbed of the `Author email` bullet and the
+  entire `User preferences` section. Those were per-author
+  behavioural context that already lived in local memory and did
+  not belong in a public project guideline doc. The `OSENSE`
+  employer mention is gone.
+
 ## [0.3.0] - 2026-05-12
 
 Phase 0 (lite-native CLI scaffold) and Phase 1 (CLI primary
@@ -291,6 +316,7 @@ rationale.
 - `LICENSE` (MIT).
 - `.gitignore`.
 
-[Unreleased]: https://github.com/hazel-ys-lin/serval-cli/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hazel-ys-lin/serval-cli/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/hazel-ys-lin/serval-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hazel-ys-lin/serval-cli/releases/tag/v0.3.0
 [0.1.0-alpha.0]: https://github.com/hazel-ys-lin/serval-cli/releases/tag/v0.1.0-alpha.0
