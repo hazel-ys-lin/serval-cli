@@ -200,6 +200,19 @@ any minor or pre-release bump.
   and `Config::resolve_env(name_or_default)`. Five inline tests
   cover empty roundtrip, missing-file default, save/load
   roundtrip, default_env fallback, and unknown-env handling.
+- `serval spec validate [<path>]` subcommand: parse-checks
+  `.feature` files (frontmatter + Gherkin) without firing any
+  HTTP. `<path>` accepts a file or a directory (walked
+  recursively); default is `specs/` in the cwd. Default table
+  shows `STATUS / FEATURES / SCENARIOS / PATH` per file with an
+  indented error line under any `ERR` row; `--json` emits an
+  array with `path / status (ok|error) / features / scenarios /
+  error`. Exit code is 0 when every file parses, 3 when any
+  fails — designed for CI / pre-commit gates. `src/spec.rs`
+  gains `collect_feature_paths(dir)` (recursive walker that
+  returns sorted paths without loading each file) so the
+  validator can iterate without paying the parsing cost
+  upfront.
 - `src/report.rs` gains `ReportRecord`, `read(path)`,
   `list(dir)`, and `resolve(dir, id)` for the new subcommands to
   consume (inline tests cover sort order, prefix matching,

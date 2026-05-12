@@ -157,6 +157,19 @@ fn walk_feature_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
     Ok(())
 }
 
+/// Recursively list every `.feature` file under `dir`, sorted by
+/// path. Missing or non-directory inputs yield an empty Vec. The
+/// `spec validate` command consumes this to enumerate files without
+/// also loading them.
+pub fn collect_feature_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if dir.exists() {
+        let _ = walk_feature_files(dir, &mut out);
+    }
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

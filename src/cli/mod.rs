@@ -20,6 +20,8 @@
 //!   — manage named environments
 //! - `serval config {path, show} [--config-file PATH] [--json]` —
 //!   show config file location / contents
+//! - `serval spec validate [<path>] [--json]` — parse-check
+//!   `.feature` files (CI / pre-commit gate)
 //!
 //! Exit codes are documented in [`exit`].
 
@@ -71,6 +73,9 @@ enum Command {
 
     /// Show the user's config file location / contents.
     Config(commands::config::ConfigArgs),
+
+    /// Spec utilities (validate; more to come).
+    Spec(commands::spec::SpecArgs),
 }
 
 /// Parse the given argv and run the matching subcommand.
@@ -104,5 +109,6 @@ where
         Command::Api(args) => commands::api::run(args, format),
         Command::Env(args) => commands::env::run(args, format),
         Command::Config(args) => commands::config::run(args, format),
+        Command::Spec(args) => commands::spec::run(args, format),
     }
 }
