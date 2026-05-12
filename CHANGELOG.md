@@ -9,6 +9,29 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-12
+
+Phase 2 complete: the step-pattern engine ships with a
+two-tier (built-in + user TOML) table, multi-step state machine
+driven by `Action::HttpRequest`, doc-string body + assertion,
+failure-mode `operation fails with` step support, and
+strict-mode vacuous-PASS detection. A 53-scenario
+event-sourcing codegen Gherkin export was used to validate the
+engine end-to-end against a mock event-store backend; vacuous
+passes that masked pattern-coverage gaps in Phase 2.5 are now
+zero.
+
+The step-pattern engine is the headline new capability: the CLI
+now translates Gherkin step text into HTTP requests + assertions
+via a regex-driven dispatch table. Built-in patterns cover
+generic HTTP-shape Gherkin (status / body-contains / header /
+query param / request-body) and the new doc-string assertions.
+Users layer project-specific patterns on top via
+`patterns.toml`, including HTTP-firing patterns that turn a
+scenario into a multi-step state machine. See
+`examples/event-sourcing.toml` for a working set against the
+event-sourcing convention.
+
 ### Added
 
 - **Phase 2.6 P0** — failure-mode step support. Two new actions:
