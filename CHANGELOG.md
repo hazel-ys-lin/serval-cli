@@ -44,6 +44,43 @@ any minor or pre-release bump.
 - `src/main.rs` hello-world stub. The `serval` binary at
   `src/bin/serval.rs` is now the sole entry point.
 
+### Added (core libraries)
+
+- `src/error.rs`: lib-crate `Error` enum (`Spec`, `System`, `Io`,
+  `Http`) and `Result<T>` alias. `Spec` corresponds to CLI exit
+  code 3, the others to exit code 2. Test-assertion failures stay
+  outside this hierarchy and surface as `pass: false` on a
+  `TestResult`.
+- `src/gherkin.rs`: Gherkin feature-file parser ported from
+  `serval-run-v2` v0.2.0 `services/gherkin.rs` (verbatim except
+  for `AppError::Validation` → `Error::Spec`). Exposes
+  `GherkinService::parse` producing `ParsedFeature` /
+  `ParsedScenario` / `ParsedStep` / `ParsedExample` DTOs. Inline
+  tests for feature / background / doc-string / data-table /
+  cell-type inference ported as-is.
+- `src/runner.rs`: async HTTP test runner ported from
+  `serval-run-v2` v0.2.0 `services/test_runner.rs` and decoupled
+  from v2's entity layer. New plain DTOs `ApiSpec` (`endpoint` +
+  `http_method`) and `EnvSpec` (`base_url`, renamed from v2's
+  `domain_name`) replace the `Api` / `Environment` SeaORM
+  entities. `TestRunner::run_scenario` now consumes a
+  `&ParsedScenario` directly — no JSON round-trip through DB
+  columns. Inline tests for placeholder substitution / status
+  extraction / JSON containment ported verbatim.
+
+### Changed (core libraries)
+
+- `TestResult` shape: drops `scenario_id` / `api_id` (`Uuid` —
+  no DB to anchor IDs to); adds `scenario_title: String` for
+  identification in the eventual `.serval/reports/<ts>.json`
+  output. `api` / `environment` references retire alongside.
+- `ParsedExample.expected_status_code` is `Option<i16>`
+  (Examples-driven, may be absent). v2's
+  `TestExample.expected_response_body` is intentionally **not**
+  ported — expected-body assertions now come strictly from `Then`
+  steps, not from a magic Examples column. Cleaner separation
+  between row data and response expectations.
+
 ### Excluded by design
 
 - Web-app and multi-user deps inherited from `serval-run-v2` are
