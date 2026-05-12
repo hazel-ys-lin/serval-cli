@@ -12,9 +12,6 @@
 # `--patterns-file examples/event-sourcing.toml`) and the CLI
 # will run codegen Gherkin written in this convention verbatim
 # against that shape.
-#
-# Coverage: happy-path step types only. Failure-mode steps
-# ("Then the operation fails with: ...") are not yet handled.
 
 # --- Setup steps (Given / And) ---
 
@@ -24,7 +21,7 @@
 [[pattern]]
 regex = '(?i)the (?P<event>\w+) event has occurred on stream "(?P<stream>[^"]+)"'
 keyword_type = "Context"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "POST"
 endpoint_template = "/streams/{{stream}}/events/{{event}}"
@@ -35,7 +32,7 @@ body_from = { kind = "doc_string" }
 [[pattern]]
 regex = '(?i)the external event arrives via (?P<translator>\w+) on stream "(?P<stream>[^"]+)"'
 keyword_type = "Context"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "POST"
 endpoint_template = "/streams/{{stream}}/translators/{{translator}}"
@@ -51,7 +48,7 @@ body_from = { kind = "doc_string" }
 [[pattern]]
 regex = '(?i)(?P<actor>\w+) sends (?P<cmd>\w+) on stream "(?P<stream>[^"]+)"'
 keyword_type = "Action"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "POST"
 endpoint_template = "/streams/{{stream}}/commands/{{cmd}}"
@@ -62,16 +59,30 @@ body_from = { kind = "doc_string" }
 [[pattern]]
 regex = '(?i)the (?P<view>\w+) view is queried'
 keyword_type = "Action"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "GET"
 endpoint_template = "/views/{{view}}"
 
 # --- Assertion steps (Then) ---
-#
+
 # `Then the <EventName> event is emitted with:` + doc string
 # `Then the view returns:` + doc string
 #   → handled by the built-in `AssertBodyMatches` pattern: every
 #   `Then` step with a doc string parses it as JSON and runs a
 #   deep partial match against the last response. No custom
-#   pattern needed here.
+#   pattern needed.
+
+# `Then the operation fails with: <msg>`
+#   → status must be 4xx AND response body must contain <msg>.
+#   Fires two actions on one regex match.
+[[pattern]]
+regex = '(?i)the operation fails with:\s*(?P<msg>.+?)\s*$'
+keyword_type = "Outcome"
+[[pattern.actions]]
+type = "assert_expected_status_in_range"
+min = 400
+max = 499
+[[pattern.actions]]
+type = "assert_body_contains_from_match_group"
+group = "msg"

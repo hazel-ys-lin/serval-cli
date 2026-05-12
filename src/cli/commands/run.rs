@@ -86,6 +86,12 @@ pub struct RunArgs {
     /// `~/.serval/patterns.toml` if it exists.
     #[arg(long, env = "SERVAL_PATTERNS_FILE")]
     pub patterns_file: Option<PathBuf>,
+
+    /// Allow a scenario to PASS even when no assertion was set
+    /// during its run. By default (strict mode) such scenarios
+    /// fail to guard against silent pattern-coverage gaps.
+    #[arg(long)]
+    pub allow_no_assertions: bool,
 }
 
 pub fn run(args: RunArgs, format: OutputFormat) -> i32 {
@@ -132,6 +138,7 @@ fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
     let user_patterns = load_user_patterns(args.patterns_file.as_deref())?;
     let runner = TestRunner::with_config(TestConfig {
         timeout: Duration::from_secs(args.timeout),
+        allow_no_assertions: args.allow_no_assertions,
         ..Default::default()
     })?
     .extend_patterns(user_patterns);

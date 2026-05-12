@@ -203,7 +203,7 @@ fn run_loads_user_patterns_from_file() {
 [[pattern]]
 regex = '(?i)the answer is\s+\d{3}'
 keyword_type = "Outcome"
-[pattern.action]
+[[pattern.actions]]
 type = "assert_status_from_text_scan"
 "#,
     )
@@ -265,7 +265,7 @@ fn run_fires_multi_step_http_requests_from_patterns() {
 [[pattern]]
 regex = '(?i)i fetch user "(?P<name>[^"]+)"'
 keyword_type = "Action"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "GET"
 endpoint_template = "/users/{{name}}"
@@ -273,7 +273,7 @@ endpoint_template = "/users/{{name}}"
 [[pattern]]
 regex = '(?i)i delete user "(?P<name>[^"]+)"'
 keyword_type = "Action"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "DELETE"
 endpoint_template = "/users/{{name}}"
@@ -390,6 +390,202 @@ fn run_then_doc_string_mismatch_fails() {
         .stdout(predicate::str::contains(
             "Response body does not match expected",
         ));
+}
+
+#[test]
+fn run_operation_fails_pattern_asserts_status_range_and_body_substring() {
+    // Phase 2.6: a user pattern for `Then the operation fails with: <msg>`
+    // fires both AssertExpectedStatusInRange (400..499) and
+    // AssertBodyContainsFromMatchGroup. The mock returns 400 with the
+    // expected message in body, so the scenario PASSes.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/x");
+        then.status(400)
+            .json_body(json!({"error": "account does not exist"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        r#"
+[[pattern]]
+regex = '(?i)the operation fails with:\s*(?P<msg>.+?)\s*$'
+keyword_type = "Outcome"
+[[pattern.actions]]
+type = "assert_expected_status_in_range"
+min = 400
+max = 499
+[[pattern.actions]]
+type = "assert_body_contains_from_match_group"
+group = "msg"
+"#,
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("op_fails.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Op fails\n  Scenario: account missing\n    When I POST /x\n    Then the operation fails with: account does not exist\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/x",
+            "--method",
+            "POST",
+            "--no-report",
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
+}
+
+#[test]
+fn run_operation_fails_status_outside_range_fails_validation() {
+    // Mock returns 200 instead of 4xx; AssertExpectedStatusInRange
+    // 400..499 should fail with a range-describing message.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/x");
+        then.status(200).json_body(json!({"unexpected": "ok"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        r#"
+[[pattern]]
+regex = '(?i)the operation fails with:\s*(?P<msg>.+?)\s*$'
+keyword_type = "Outcome"
+[[pattern.actions]]
+type = "assert_expected_status_in_range"
+min = 400
+max = 499
+[[pattern.actions]]
+type = "assert_body_contains_from_match_group"
+group = "msg"
+"#,
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("op_unexpected.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Op unexpected\n  Scenario: should have failed\n    When I POST /x\n    Then the operation fails with: bad thing\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/x",
+            "--method",
+            "POST",
+            "--no-report",
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains(
+            "Expected status 400..=499, got 200",
+        ));
+}
+
+#[test]
+fn run_vacuous_pass_fails_by_default() {
+    // Phase 2.6 P1: a scenario that runs without any assertion set
+    // is marked FAIL with a hint pointing at --allow-no-assertions.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/health");
+        then.status(200);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Spec has neither a status pattern nor a doc string — nothing
+    // fires an assertion.
+    let feature_path = tmp.path().join("vacuous.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Vacuous\n  Scenario: no assertion\n    When I GET /health\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/health",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains(
+            "scenario ran without setting any assertion",
+        ))
+        .stdout(predicate::str::contains("--allow-no-assertions"));
+}
+
+#[test]
+fn run_vacuous_pass_allowed_with_flag() {
+    // Same as above with `--allow-no-assertions` — scenario PASSes.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/health");
+        then.status(200);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let feature_path = tmp.path().join("vacuous.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Vacuous\n  Scenario: no assertion\n    When I GET /health\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/health",
+            "--method",
+            "GET",
+            "--no-report",
+            "--allow-no-assertions",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
 }
 
 #[test]

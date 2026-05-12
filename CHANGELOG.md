@@ -11,6 +11,42 @@ any minor or pre-release bump.
 
 ### Added
 
+- **Phase 2.6 P0** — failure-mode step support. Two new actions:
+  `AssertExpectedStatusInRange { min, max }` (sets
+  `expected_status` to a closed range matcher) and
+  `AssertBodyContainsFromMatchGroup { group }` (pushes a named
+  regex capture into `expected_body_contains`).
+  `examples/event-sourcing.toml` now ships a user pattern for
+  `Then the operation fails with: <msg>` that fires both —
+  asserting 4xx + body contains the message.
+- `runner::StatusMatcher` enum (`Exact(i16) | Range { min, max }`)
+  replaces the prior plain `i16` for `expected_status`.
+- **Phase 2.6 P1** — strict-mode vacuous-PASS detection. By
+  default a scenario that runs to end without setting any
+  assertion (`expected_status` / `expected_body` /
+  `expected_body_contains`) now FAILs with a clear message
+  pointing at the new `--allow-no-assertions` flag. This guards
+  against the silent false-green pattern-coverage gap surfaced
+  by the Phase 2.5 dogfood (23 / 53 scenarios were vacuously
+  passing).
+- Multi-action patterns: a single `[[pattern]]` can declare
+  multiple `[[pattern.actions]]` entries. All actions fire in
+  order when the regex matches.
+
+### Changed
+
+- **Breaking (pre-1.0)** patterns.toml schema: `[pattern.action]`
+  inline table → `[[pattern.actions]]` table array (or
+  `actions = [{...}, ...]`). One-pattern-one-action specs
+  migrate by renaming the section header. The TOML loader
+  rejects empty `actions = []` arrays.
+- `ScenarioContext::expected_status` is now
+  `Option<StatusMatcher>` rather than `Option<i16>`. Callers
+  building a context from an Examples-table row use
+  `StatusMatcher::Exact(n)` (handled by the runner).
+- `TestConfig` grew `allow_no_assertions: bool` (default
+  `false`).
+
 - **Phase 2.5** — first end-to-end dogfood of the step-pattern
   engine. `examples/event-sourcing.toml` ships a happy-path
   user-pattern set that lets event-sourcing-style codegen Gherkin

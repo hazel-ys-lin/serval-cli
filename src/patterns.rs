@@ -31,7 +31,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::gherkin::ParsedStep;
-use crate::runner::{HttpResponse, ScenarioContext};
+use crate::runner::{HttpResponse, ScenarioContext, StatusMatcher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeywordType {
@@ -109,6 +109,18 @@ pub enum Action {
     /// parsing fails. Used by the built-in `Then` pattern.
     AssertBodyMatches,
 
+    /// Set `expected_status` to a closed range `[min, max]`. Used
+    /// by user patterns that need to assert "any 4xx" without
+    /// pinning to a specific status code (e.g. failure-mode steps
+    /// in event-sourcing codegen Gherkin).
+    AssertExpectedStatusInRange { min: i16, max: i16 },
+
+    /// Read a named regex capture group on the step text and push
+    /// the captured substring to `expected_body_contains`. Used
+    /// for patterns like `Then the operation fails with: <msg>`
+    /// where the failure message is a regex capture.
+    AssertBodyContainsFromMatchGroup { group: String },
+
     /// Fire an HTTP request and append the response to
     /// [`ScenarioContext::responses`]. `endpoint_template` may
     /// reference named regex capture groups from the matching
@@ -126,7 +138,11 @@ pub struct StepPattern {
     /// `None` = pattern fires regardless of step keyword. `Some` =
     /// only fires for matching `Given` / `When` / `Then`.
     pub keyword_type: Option<KeywordType>,
-    pub action: Action,
+    /// Actions to fire in order when this pattern matches. A single
+    /// step text + regex match can drive multiple effects — e.g. a
+    /// failure-mode `Then` step asserts both a status range and a
+    /// body-contains substring from the same capture.
+    pub actions: Vec<Action>,
 }
 
 /// Replace `<key>` placeholders in `text` with values from
@@ -195,7 +211,7 @@ struct TomlPattern {
     regex: String,
     #[serde(default)]
     keyword_type: Option<String>,
-    action: TomlAction,
+    actions: Vec<TomlAction>,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +224,13 @@ enum TomlAction {
     SetRequestBodyFromTextOrExampleData,
     SetRequestBodyFromDocString,
     AssertBodyMatches,
+    AssertExpectedStatusInRange {
+        min: i16,
+        max: i16,
+    },
+    AssertBodyContainsFromMatchGroup {
+        group: String,
+    },
     HttpRequest {
         method: String,
         endpoint_template: String,
@@ -238,7 +261,21 @@ fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
         }
         None => None,
     };
-    let action = match t.action {
+    if t.actions.is_empty() {
+        return Err(Error::Spec(
+            "pattern must declare at least one action in `actions = [...]`".into(),
+        ));
+    }
+    let actions: Vec<Action> = t.actions.into_iter().map(toml_to_action).collect();
+    Ok(StepPattern {
+        regex,
+        keyword_type,
+        actions,
+    })
+}
+
+fn toml_to_action(t: TomlAction) -> Action {
+    match t {
         TomlAction::AssertStatusFromTextScan => Action::AssertStatusFromTextScan,
         TomlAction::AssertBodyContainsFromQuotedScan => Action::AssertBodyContainsFromQuotedScan,
         TomlAction::SetHeaderFromWordScan => Action::SetHeaderFromWordScan,
@@ -248,6 +285,12 @@ fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
         }
         TomlAction::SetRequestBodyFromDocString => Action::SetRequestBodyFromDocString,
         TomlAction::AssertBodyMatches => Action::AssertBodyMatches,
+        TomlAction::AssertExpectedStatusInRange { min, max } => {
+            Action::AssertExpectedStatusInRange { min, max }
+        }
+        TomlAction::AssertBodyContainsFromMatchGroup { group } => {
+            Action::AssertBodyContainsFromMatchGroup { group }
+        }
         TomlAction::HttpRequest {
             method,
             endpoint_template,
@@ -257,12 +300,7 @@ fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
             endpoint_template,
             body_from: body_from.map(toml_to_value_source),
         },
-    };
-    Ok(StepPattern {
-        regex,
-        keyword_type,
-        action,
-    })
+    }
 }
 
 fn toml_to_value_source(t: TomlValueSource) -> ValueSource {
@@ -276,10 +314,10 @@ fn toml_to_value_source(t: TomlValueSource) -> ValueSource {
 /// Built-in patterns shipped inside the binary. Reproduces the
 /// pre-refactor behaviour of `runner::process_step` exactly.
 pub fn builtin_patterns() -> Vec<StepPattern> {
-    let mk = |re: &str, kt: Option<KeywordType>, action: Action| StepPattern {
+    let mk = |re: &str, kt: Option<KeywordType>, actions: Vec<Action>| StepPattern {
         regex: Regex::new(re).expect("built-in pattern regex must compile"),
         keyword_type: kt,
-        action,
+        actions,
     };
 
     vec![
@@ -291,21 +329,21 @@ pub fn builtin_patterns() -> Vec<StepPattern> {
         mk(
             r"(?i)\b(?:status|code|expect)",
             Some(KeywordType::Outcome),
-            Action::AssertStatusFromTextScan,
+            vec![Action::AssertStatusFromTextScan],
         ),
         // Outcome-step body-contains assertion via quoted literal.
         mk(
             r"(?i)contains|should\s+have",
             Some(KeywordType::Outcome),
-            Action::AssertBodyContainsFromQuotedScan,
+            vec![Action::AssertBodyContainsFromQuotedScan],
         ),
         // Header extraction (any keyword).
-        mk(r"(?i)\bheader\b", None, Action::SetHeaderFromWordScan),
+        mk(r"(?i)\bheader\b", None, vec![Action::SetHeaderFromWordScan]),
         // Query-param extraction (any keyword).
         mk(
             r"(?i)query\s+param(?:eter)?\b",
             None,
-            Action::SetQueryParamFromWordScan,
+            vec![Action::SetQueryParamFromWordScan],
         ),
         // Doc-string body for Given / When: ordered before the
         // text/example-data fallback so a triple-quoted block always
@@ -313,22 +351,26 @@ pub fn builtin_patterns() -> Vec<StepPattern> {
         mk(
             "^",
             Some(KeywordType::Context),
-            Action::SetRequestBodyFromDocString,
+            vec![Action::SetRequestBodyFromDocString],
         ),
         mk(
             "^",
             Some(KeywordType::Action),
-            Action::SetRequestBodyFromDocString,
+            vec![Action::SetRequestBodyFromDocString],
         ),
         // Doc-string deep-match for Then: parses the triple-quoted
         // block into `expected_body` for end-of-scenario validation.
-        mk("^", Some(KeywordType::Outcome), Action::AssertBodyMatches),
+        mk(
+            "^",
+            Some(KeywordType::Outcome),
+            vec![Action::AssertBodyMatches],
+        ),
         // Body cue fallback for steps that announce a body but did
         // not provide a doc string.
         mk(
             r"(?i)\b(?:request\s+(?:body|payload)|with\s+body)\b",
             None,
-            Action::SetRequestBodyFromTextOrExampleData,
+            vec![Action::SetRequestBodyFromTextOrExampleData],
         ),
     ]
 }
@@ -361,17 +403,19 @@ pub async fn apply(
         let Some(captures) = pattern.regex.captures(text) else {
             continue;
         };
-        execute_action(
-            &pattern.action,
-            text,
-            &captures,
-            step,
-            context,
-            example_data,
-            client,
-            base_url,
-        )
-        .await?;
+        for action in &pattern.actions {
+            execute_action(
+                action,
+                text,
+                &captures,
+                step,
+                context,
+                example_data,
+                client,
+                base_url,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -406,15 +450,17 @@ async fn execute_action(
             .await
         }
         other => {
-            execute_sync_action(other, text, step, context, example_data);
+            execute_sync_action(other, text, captures, step, context, example_data);
             Ok(())
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_sync_action(
     action: &Action,
     text: &str,
+    captures: &Captures<'_>,
     step: &ParsedStep,
     context: &mut ScenarioContext,
     example_data: &Value,
@@ -422,7 +468,18 @@ fn execute_sync_action(
     match action {
         Action::AssertStatusFromTextScan => {
             if let Some(status) = scan_status_code(text) {
-                context.expected_status = Some(status);
+                context.expected_status = Some(StatusMatcher::Exact(status));
+            }
+        }
+        Action::AssertExpectedStatusInRange { min, max } => {
+            context.expected_status = Some(StatusMatcher::Range {
+                min: *min,
+                max: *max,
+            });
+        }
+        Action::AssertBodyContainsFromMatchGroup { group } => {
+            if let Some(m) = captures.name(group) {
+                context.expected_body_contains.push(m.as_str().to_string());
             }
         }
         Action::AssertBodyContainsFromQuotedScan => {
@@ -676,7 +733,7 @@ mod tests {
             apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
             assert_eq!(
                 ctx.expected_status,
-                Some(expected),
+                Some(StatusMatcher::Exact(expected)),
                 "input {input:?} should set expected_status = {expected}"
             );
         }
@@ -792,7 +849,7 @@ mod tests {
         let mut ctx = ScenarioContext::default();
         apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
         // status pattern still fires
-        assert_eq!(ctx.expected_status, Some(200));
+        assert_eq!(ctx.expected_status, Some(StatusMatcher::Exact(200)));
         // but no doc string → no expected_body
         assert!(ctx.expected_body.is_none());
     }
@@ -809,6 +866,65 @@ mod tests {
         let example = serde_json::json!({"email": "a@b.c"});
         apply_sync_only(&patterns, &step, &mut ctx, &example).await;
         assert_eq!(ctx.request_body, Some(pre_set));
+    }
+
+    #[tokio::test]
+    async fn assert_expected_status_in_range_sets_matcher() {
+        let pattern = StepPattern {
+            regex: Regex::new(r"^").unwrap(),
+            keyword_type: Some(KeywordType::Outcome),
+            actions: vec![Action::AssertExpectedStatusInRange { min: 400, max: 499 }],
+        };
+        let step = outcome_step("the operation fails with: bad request");
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&[pattern], &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.expected_status,
+            Some(StatusMatcher::Range { min: 400, max: 499 })
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_body_contains_from_match_group_captures() {
+        let pattern = StepPattern {
+            regex: Regex::new(r"(?i)fails with:\s*(?P<msg>.+)").unwrap(),
+            keyword_type: Some(KeywordType::Outcome),
+            actions: vec![Action::AssertBodyContainsFromMatchGroup {
+                group: "msg".to_string(),
+            }],
+        };
+        let step = outcome_step("the operation fails with: 帳號名稱已存在");
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&[pattern], &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.expected_body_contains,
+            vec!["帳號名稱已存在".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_action_pattern_fires_each_action_in_order() {
+        // Phase 2.6 schema: one regex match can trigger multiple
+        // actions (operation-fails-with combines status range +
+        // body contains).
+        let pattern = StepPattern {
+            regex: Regex::new(r"(?i)the operation fails with:\s*(?P<msg>.+)").unwrap(),
+            keyword_type: Some(KeywordType::Outcome),
+            actions: vec![
+                Action::AssertExpectedStatusInRange { min: 400, max: 499 },
+                Action::AssertBodyContainsFromMatchGroup {
+                    group: "msg".to_string(),
+                },
+            ],
+        };
+        let step = outcome_step("the operation fails with: not found");
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&[pattern], &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.expected_status,
+            Some(StatusMatcher::Range { min: 400, max: 499 })
+        );
+        assert_eq!(ctx.expected_body_contains, vec!["not found".to_string()]);
     }
 
     // ---- ValueSource + endpoint template helpers ----
@@ -937,7 +1053,7 @@ mod tests {
 [[pattern]]
 regex = '(?i)\bexpects\s+\d{3}\s+OK\b'
 keyword_type = "Outcome"
-[pattern.action]
+[[pattern.actions]]
 type = "assert_status_from_text_scan"
 "#,
         );
@@ -945,8 +1061,8 @@ type = "assert_status_from_text_scan"
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].keyword_type, Some(KeywordType::Outcome));
         assert!(matches!(
-            patterns[0].action,
-            Action::AssertStatusFromTextScan
+            patterns[0].actions.as_slice(),
+            [Action::AssertStatusFromTextScan]
         ));
     }
 
@@ -959,58 +1075,109 @@ type = "assert_status_from_text_scan"
             r#"
 [[pattern]]
 regex = '\bA\b'
-[pattern.action]
+[[pattern.actions]]
 type = "assert_status_from_text_scan"
 
 [[pattern]]
 regex = '\bB\b'
-[pattern.action]
+[[pattern.actions]]
 type = "assert_body_contains_from_quoted_scan"
 
 [[pattern]]
 regex = '\bC\b'
-[pattern.action]
+[[pattern.actions]]
 type = "set_header_from_word_scan"
 
 [[pattern]]
 regex = '\bD\b'
-[pattern.action]
+[[pattern.actions]]
 type = "set_query_param_from_word_scan"
 
 [[pattern]]
 regex = '\bE\b'
-[pattern.action]
+[[pattern.actions]]
 type = "set_request_body_from_text_or_example_data"
 
 [[pattern]]
 regex = '\bF\b'
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "POST"
 endpoint_template = "/x"
 
 [[pattern]]
 regex = '\bG\b'
-[pattern.action]
+[[pattern.actions]]
 type = "set_request_body_from_doc_string"
 
 [[pattern]]
 regex = '\bH\b'
-[pattern.action]
+[[pattern.actions]]
 type = "assert_body_matches"
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
         assert_eq!(patterns.len(), 8);
         assert!(matches!(
-            patterns[5].action,
+            patterns[5].actions[0],
             Action::HttpRequest { ref method, .. } if method == "POST"
         ));
         assert!(matches!(
-            patterns[6].action,
+            patterns[6].actions[0],
             Action::SetRequestBodyFromDocString
         ));
-        assert!(matches!(patterns[7].action, Action::AssertBodyMatches));
+        assert!(matches!(patterns[7].actions[0], Action::AssertBodyMatches));
+    }
+
+    #[test]
+    fn load_from_file_parses_multi_action_pattern() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "multi.toml",
+            r#"
+[[pattern]]
+regex = '(?i)the operation fails with:\s*(?P<msg>.+)'
+keyword_type = "Outcome"
+[[pattern.actions]]
+type = "assert_expected_status_in_range"
+min = 400
+max = 499
+[[pattern.actions]]
+type = "assert_body_contains_from_match_group"
+group = "msg"
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].actions.len(), 2);
+        assert!(matches!(
+            patterns[0].actions[0],
+            Action::AssertExpectedStatusInRange { min: 400, max: 499 }
+        ));
+        match &patterns[0].actions[1] {
+            Action::AssertBodyContainsFromMatchGroup { group } => assert_eq!(group, "msg"),
+            other => panic!("expected AssertBodyContainsFromMatchGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_rejects_empty_actions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "empty.toml",
+            r#"
+[[pattern]]
+regex = '\bx\b'
+actions = []
+"#,
+        );
+        let err = load_from_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one action"),
+            "expected empty-actions error, got {err}"
+        );
     }
 
     #[test]
@@ -1023,7 +1190,7 @@ type = "assert_body_matches"
 [[pattern]]
 regex = '(?i)create user "(?P<name>[^"]+)"'
 keyword_type = "Action"
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "POST"
 endpoint_template = "/users"
@@ -1032,7 +1199,7 @@ body_from = { kind = "match_group", name = "name" }
         );
         let patterns = load_from_file(&path).unwrap();
         assert_eq!(patterns.len(), 1);
-        match &patterns[0].action {
+        match &patterns[0].actions[0] {
             Action::HttpRequest {
                 method,
                 endpoint_template,
@@ -1055,7 +1222,7 @@ body_from = { kind = "match_group", name = "name" }
             r#"
 [[pattern]]
 regex = '\bcreate\b'
-[pattern.action]
+[[pattern.actions]]
 type = "http_request"
 method = "POST"
 endpoint_template = "/x"
@@ -1063,7 +1230,7 @@ body_from = { kind = "literal", value = { hello = "world" } }
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
-        match &patterns[0].action {
+        match &patterns[0].actions[0] {
             Action::HttpRequest {
                 body_from: Some(ValueSource::Literal(v)),
                 ..
@@ -1083,7 +1250,7 @@ body_from = { kind = "literal", value = { hello = "world" } }
             r#"
 [[pattern]]
 regex = '['
-[pattern.action]
+[[pattern.actions]]
 type = "assert_status_from_text_scan"
 "#,
         );
@@ -1104,7 +1271,7 @@ type = "assert_status_from_text_scan"
 [[pattern]]
 regex = '\bx\b'
 keyword_type = "Setup"
-[pattern.action]
+[[pattern.actions]]
 type = "assert_status_from_text_scan"
 "#,
         );
@@ -1124,7 +1291,7 @@ type = "assert_status_from_text_scan"
             r#"
 [[pattern]]
 regex = '\bx\b'
-[pattern.action]
+[[pattern.actions]]
 type = "lol_make_coffee"
 "#,
         );

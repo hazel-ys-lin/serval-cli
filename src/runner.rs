@@ -50,6 +50,13 @@ pub struct TestConfig {
     pub timeout: Duration,
     pub auth_token: Option<String>,
     pub custom_headers: HashMap<String, String>,
+    /// When `false` (strict mode, the default), a scenario that
+    /// reaches end-of-run without setting any assertion
+    /// (`expected_status`, `expected_body`, `expected_body_contains`)
+    /// is marked as failed. Set to `true` via the CLI flag
+    /// `--allow-no-assertions` to opt out — useful for pure
+    /// fire-and-forget scenarios.
+    pub allow_no_assertions: bool,
 }
 
 impl Default for TestConfig {
@@ -58,6 +65,34 @@ impl Default for TestConfig {
             timeout: Duration::from_secs(30),
             auth_token: None,
             custom_headers: HashMap::new(),
+            allow_no_assertions: false,
+        }
+    }
+}
+
+/// How a scenario asserts against the response status. Patterns set
+/// [`ScenarioContext::expected_status`] to one of these; the runner
+/// then validates the actual status accordingly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusMatcher {
+    /// Status must equal `n` exactly.
+    Exact(i16),
+    /// Status must fall in the closed range `[min, max]`.
+    Range { min: i16, max: i16 },
+}
+
+impl StatusMatcher {
+    pub fn matches(&self, status: i16) -> bool {
+        match self {
+            Self::Exact(s) => *s == status,
+            Self::Range { min, max } => (*min..=*max).contains(&status),
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Exact(s) => s.to_string(),
+            Self::Range { min, max } => format!("{min}..={max}"),
         }
     }
 }
@@ -99,7 +134,7 @@ pub struct ScenarioContext {
     pub request_headers: HashMap<String, String>,
     pub query_params: HashMap<String, String>,
     pub path_params: HashMap<String, String>,
-    pub expected_status: Option<i16>,
+    pub expected_status: Option<StatusMatcher>,
     pub expected_body: Option<serde_json::Value>,
     pub expected_body_contains: Vec<String>,
     /// Data table from a step (used as setup data; not currently
@@ -191,7 +226,7 @@ impl TestRunner {
         let start = Instant::now();
 
         let mut context = ScenarioContext {
-            expected_status: example.expected_status_code,
+            expected_status: example.expected_status_code.map(StatusMatcher::Exact),
             ..Default::default()
         };
 
@@ -396,10 +431,21 @@ impl TestRunner {
         body: &serde_json::Value,
         context: &ScenarioContext,
     ) -> std::result::Result<(), String> {
-        if let Some(expected_status) = context.expected_status
-            && status != expected_status
+        if !self.config.allow_no_assertions && !has_any_assertion(context) {
+            return Err("scenario ran without setting any assertion; pass \
+                 `--allow-no-assertions` to override or add a pattern that \
+                 fires `AssertExpectedStatusInRange` / `AssertBodyContains*` \
+                 / `AssertBodyMatches`"
+                .to_string());
+        }
+
+        if let Some(expected) = &context.expected_status
+            && !expected.matches(status)
         {
-            return Err(format!("Expected status {expected_status}, got {status}"));
+            return Err(format!(
+                "Expected status {}, got {status}",
+                expected.describe()
+            ));
         }
 
         for pattern in &context.expected_body_contains {
@@ -443,6 +489,16 @@ impl TestRunner {
             _ => actual == expected,
         }
     }
+}
+
+/// True when the scenario context has at least one assertion set.
+/// Used by strict mode (the default) to flag vacuous PASSes —
+/// scenarios that run their HTTP calls but never set an
+/// `expected_*` field, which would otherwise return Ok vacuously.
+fn has_any_assertion(context: &ScenarioContext) -> bool {
+    context.expected_status.is_some()
+        || context.expected_body.is_some()
+        || !context.expected_body_contains.is_empty()
 }
 
 #[cfg(test)]
