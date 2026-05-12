@@ -52,3 +52,5 @@ httpmock = "0.7"
 assert_cmd = "2"
 # Composable predicates for `assert_cmd` output assertions.
 predicates = "3"
+# Isolated tempdirs for report-writer tests.
+tempfile = "3"

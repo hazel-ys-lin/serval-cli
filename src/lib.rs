@@ -13,10 +13,13 @@
 //! - [`spec`] — permissive `.feature` file loader (multi-Feature,
 //!   stale language directives)
 //! - [`runner`] — async HTTP test runner consuming parsed scenarios
+//! - [`report`] — on-disk JSON run report written under
+//!   `.serval/reports/` after each `serval run`
 
 pub mod cli;
 pub mod error;
 pub mod frontmatter;
 pub mod gherkin;
+pub mod report;
 pub mod runner;
 pub mod spec;

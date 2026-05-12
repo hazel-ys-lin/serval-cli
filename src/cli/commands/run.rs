@@ -26,6 +26,7 @@ use crate::cli::exit;
 use crate::cli::output::OutputFormat;
 use crate::error::{Error, Result};
 use crate::frontmatter::{self, Frontmatter};
+use crate::report::{self, RunReport, RunSummary, TargetRef};
 use crate::runner::{ApiSpec, EnvSpec, TestConfig, TestResult, TestRunner};
 use crate::spec;
 
@@ -55,6 +56,15 @@ pub struct RunArgs {
     /// Per-request timeout in seconds.
     #[arg(long, default_value_t = 30)]
     pub timeout: u64,
+
+    /// Directory to write the JSON run report into. Defaults to
+    /// `<cwd>/.serval/reports`. Falls back to `$SERVAL_REPORT_DIR`.
+    #[arg(long, env = "SERVAL_REPORT_DIR")]
+    pub report_dir: Option<PathBuf>,
+
+    /// Skip writing the JSON run report file.
+    #[arg(long)]
+    pub no_report: bool,
 }
 
 pub fn run(args: RunArgs, format: OutputFormat) -> i32 {
@@ -81,6 +91,8 @@ fn map_error_to_exit(e: &Error) -> i32 {
 }
 
 fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
+    let started_at = time::OffsetDateTime::now_utc();
+
     let raw = std::fs::read_to_string(&args.path)?;
     let (fm, body) = frontmatter::split(&raw)?;
     let api = resolve_api_spec(&fm, &args)?;
@@ -111,8 +123,54 @@ fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
         Result::Ok(all)
     })?;
 
+    let finished_at = time::OffsetDateTime::now_utc();
+
     print_results(&all_results, format);
+
+    if !args.no_report {
+        let report = build_report(&args, &api, &env, &all_results, started_at, finished_at);
+        let dir = args
+            .report_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".serval").join("reports"));
+        let path = report::write(&report, &dir)?;
+        match format {
+            OutputFormat::Json => eprintln!("report written to {}", path.display()),
+            OutputFormat::Table => println!("  report: {}", path.display()),
+        }
+    }
+
     Ok(all_results.iter().any(|r| !r.pass))
+}
+
+fn build_report(
+    args: &RunArgs,
+    api: &ApiSpec,
+    env: &EnvSpec,
+    results: &[TestResult],
+    started_at: time::OffsetDateTime,
+    finished_at: time::OffsetDateTime,
+) -> RunReport {
+    let source_file = args
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| args.path.clone())
+        .to_string_lossy()
+        .into_owned();
+
+    RunReport {
+        schema_version: report::SCHEMA_VERSION,
+        started_at,
+        finished_at,
+        source_file,
+        target: TargetRef {
+            base_url: env.base_url.clone(),
+            endpoint: api.endpoint.clone(),
+            method: api.http_method.clone(),
+        },
+        summary: RunSummary::from_results(results),
+        results: results.to_vec(),
+    }
 }
 
 fn resolve_api_spec(fm: &Option<Frontmatter>, args: &RunArgs) -> Result<ApiSpec> {

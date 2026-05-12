@@ -123,6 +123,19 @@ any minor or pre-release bump.
   assertion fails, `2` system / network error, `3` bad input.
   Output is per-scenario `[PASS] / [FAIL]` lines plus a summary
   by default, or pretty-printed JSON with `--json`.
+- `serval run` writes a JSON report to
+  `<cwd>/.serval/reports/<rfc3339-timestamp>.json` after every
+  run (filename colons replaced with dashes for Windows fs
+  safety). Report schema v1 captures `schema_version`,
+  `started_at` / `finished_at`, `source_file`, the resolved
+  `target` (base_url + endpoint + method), a `summary` block
+  (total / passed / failed), and the full `results` array.
+  Override the directory with `--report-dir <path>` or
+  `$SERVAL_REPORT_DIR`; skip writing with `--no-report`. In
+  table mode the report path is appended to stdout; with
+  `--json`, it goes to stderr so stdout stays pure JSON. New
+  module `src/report.rs`. New dev-dep `tempfile = "3"` for
+  isolated integration tests.
 - `src/frontmatter.rs`: optional YAML frontmatter parser for
   `.feature` files. `Frontmatter { api, implements }` with
   `ApiFrontmatter { path, method, collection }`. `split(content)`

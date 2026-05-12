@@ -2,6 +2,9 @@
 //! `assert_cmd` against an `httpmock` fake HTTP server, so the full
 //! file → frontmatter → parser → runner → output pipeline is
 //! exercised on every test.
+//!
+//! Every test passes `--no-report` so cargo test does not leave
+//! `.serval/reports/*.json` artifacts in the project root.
 
 use assert_cmd::Command;
 use httpmock::{Method, MockServer};
@@ -30,6 +33,7 @@ fn run_passes_when_status_assertion_matches() {
             "/health",
             "--method",
             "GET",
+            "--no-report",
         ])
         .assert()
         .success()
@@ -56,6 +60,7 @@ fn run_returns_exit_1_when_assertion_fails() {
             "/health",
             "--method",
             "GET",
+            "--no-report",
         ])
         .assert()
         .code(1)
@@ -73,7 +78,13 @@ fn run_uses_frontmatter_when_present_without_flags() {
 
     Command::cargo_bin("serval")
         .unwrap()
-        .args(["run", FX_WITH_FM, "--base-url", &server.base_url()])
+        .args([
+            "run",
+            FX_WITH_FM,
+            "--base-url",
+            &server.base_url(),
+            "--no-report",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("[PASS]"));
@@ -88,6 +99,7 @@ fn run_exits_3_when_target_unspecified() {
             FX_NO_FM,
             "--base-url",
             "http://localhost:9999",
+            "--no-report",
             // intentionally no --endpoint / --method
         ])
         .assert()
@@ -115,6 +127,7 @@ fn run_emits_json_array_with_flag() {
             "--method",
             "GET",
             "--json",
+            "--no-report",
         ])
         .assert()
         .success()
