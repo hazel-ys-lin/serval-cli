@@ -95,6 +95,13 @@ any minor or pre-release bump.
   Cucumber tag-inheritance contract so `serval run --tag @foo`
   filters correctly when `@foo` sits on the `Rule:` line rather
   than directly on a `Scenario:`.
+- `TestRunner::run_scenario` runs concrete scenarios (`Scenario:`
+  blocks with no `Examples:` table) exactly once with
+  `Value::Null` as the implicit row data. Previously the empty
+  examples iterator meant the scenario was silently never
+  executed — fine for `Scenario Outline:` flows but broken for
+  one-off concrete scenarios common in event-sourcing /
+  specification-by-example style specs.
 
 ### Added (spec loader)
 

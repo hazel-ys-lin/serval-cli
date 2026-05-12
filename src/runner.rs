@@ -15,6 +15,7 @@
 
 use reqwest::{Client, Method, Response};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -100,15 +101,29 @@ impl TestRunner {
     }
 
     /// Run every example in `scenario` against `api` on `env`.
+    ///
+    /// Concrete scenarios — those with `Given/When/Then` steps but no
+    /// `Examples:` table — run exactly once with `Value::Null` as the
+    /// implicit row data. Placeholder substitution sees no fields to
+    /// expand, so the step text passes through unchanged.
     pub async fn run_scenario(
         &self,
         scenario: &ParsedScenario,
         api: &ApiSpec,
         env: &EnvSpec,
     ) -> Result<Vec<TestResult>> {
-        let mut results = Vec::with_capacity(scenario.examples.len());
+        let examples: Cow<[ParsedExample]> = if scenario.examples.is_empty() {
+            Cow::Owned(vec![ParsedExample {
+                data: serde_json::Value::Null,
+                expected_status_code: None,
+            }])
+        } else {
+            Cow::Borrowed(&scenario.examples)
+        };
 
-        for (index, example) in scenario.examples.iter().enumerate() {
+        let mut results = Vec::with_capacity(examples.len());
+
+        for (index, example) in examples.iter().enumerate() {
             let result = self
                 .run_example(scenario, api, env, example, index as i32)
                 .await;

@@ -43,3 +43,7 @@ thiserror = "2.0.18"
 uuid = { version = "1.16", features = ["v4", "serde"] }
 time = { version = "0.3.45", features = ["serde", "macros", "formatting"] }
 dotenvy = "0.15.7"
+
+[dev-dependencies]
+# Fake HTTP server for runner integration tests.
+httpmock = "0.7"
