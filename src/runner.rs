@@ -63,6 +63,7 @@ pub struct TestResult {
     pub response_status: i16,
     pub response_data: Option<serde_json::Value>,
     pub request_duration_ms: i64,
+    #[serde(with = "time::serde::rfc3339")]
     pub request_time: time::OffsetDateTime,
 }
 

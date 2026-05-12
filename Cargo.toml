@@ -42,7 +42,7 @@ thiserror = "2.0.18"
 
 # Misc
 uuid = { version = "1.16", features = ["v4", "serde"] }
-time = { version = "0.3.45", features = ["serde", "macros", "formatting"] }
+time = { version = "0.3.45", features = ["serde", "serde-well-known", "macros", "formatting", "parsing"] }
 dotenvy = "0.15.7"
 
 [dev-dependencies]

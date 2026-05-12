@@ -102,6 +102,13 @@ any minor or pre-release bump.
   executed — fine for `Scenario Outline:` flows but broken for
   one-off concrete scenarios common in event-sourcing /
   specification-by-example style specs.
+- `TestResult.request_time` serializes as an RFC 3339 string
+  (e.g. `"2026-05-12T03:30:12.923819Z"`) instead of the
+  9-element integer array `time::OffsetDateTime` defaults to.
+  Makes `serval run --json` output and the upcoming JSON report
+  files (PR-1B) consumable by `jq` and agent loops without
+  custom decoding. Requires the `serde-well-known` + `parsing`
+  features on the `time` crate.
 
 ### Added (CLI)
 
