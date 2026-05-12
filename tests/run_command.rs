@@ -237,6 +237,81 @@ type = "assert_status_from_text_scan"
 }
 
 #[test]
+fn run_fires_multi_step_http_requests_from_patterns() {
+    // Two `Action::HttpRequest` patterns drive two distinct HTTP
+    // calls in one scenario; validation runs against the *last*
+    // response (DELETE → 204). This exercises:
+    //   - endpoint-template substitution via named capture groups
+    //   - response accumulation across steps
+    //   - that `--endpoint` / `--method` flags become dummies once
+    //     `HttpRequest` patterns are firing (the implicit fallback
+    //     never runs because `responses` is non-empty).
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/users/alice");
+        then.status(200).json_body(json!({"name": "alice"}));
+    });
+    server.mock(|when, then| {
+        when.method(Method::DELETE).path("/users/alice");
+        then.status(204);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        r#"
+[[pattern]]
+regex = '(?i)i fetch user "(?P<name>[^"]+)"'
+keyword_type = "Action"
+[pattern.action]
+type = "http_request"
+method = "GET"
+endpoint_template = "/users/{{name}}"
+
+[[pattern]]
+regex = '(?i)i delete user "(?P<name>[^"]+)"'
+keyword_type = "Action"
+[pattern.action]
+type = "http_request"
+method = "DELETE"
+endpoint_template = "/users/{{name}}"
+"#,
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("multi.feature");
+    std::fs::write(
+        &feature_path,
+        "Feature: Multi-step\n  Scenario: fetch then delete\n    When I fetch user \"alice\"\n    And I delete user \"alice\"\n    Then status should be 204\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            // Dummy frontmatter target — never fires because
+            // HttpRequest patterns populate `responses` first.
+            "--endpoint",
+            "/unused",
+            "--method",
+            "GET",
+            "--no-report",
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"))
+        .stdout(predicate::str::contains("status 204"));
+}
+
+#[test]
 fn run_exits_3_when_no_base_url_nor_env_resolves() {
     // Config file with no entries — neither --base-url nor --env
     // can resolve a target.

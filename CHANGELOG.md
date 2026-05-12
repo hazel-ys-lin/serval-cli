@@ -9,6 +9,36 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+### Added
+
+- **Phase 2.3** — multi-step state machine in the runner. A
+  scenario can now fire multiple HTTP requests via `Action::HttpRequest`
+  patterns, each recorded as an `HttpResponse` entry on the
+  `ScenarioContext`. Validation runs against the *last* response.
+- New `ValueSource` enum (`MatchGroup` / `DocString` / `Literal`)
+  for data-driven action arguments. `Action::HttpRequest::body_from`
+  consumes it today; future variants can reuse it.
+- User `patterns.toml` now accepts `type = "http_request"` with
+  `method`, `endpoint_template` (supports `{{group_name}}`
+  substitution from named regex captures), and an optional
+  `body_from = { kind = "match_group" | "doc_string" | "literal", … }`.
+
+### Changed
+
+- `runner::StepContext` renamed to `ScenarioContext` (the state
+  is scenario-wide, not per-step) and grew a
+  `responses: Vec<HttpResponse>` field.
+- `patterns::apply` and `runner::process_step` are now `async`
+  and return `Result<()>` — `Action::HttpRequest` can fail with
+  a transport error mid-scenario, which surfaces as a failed
+  `TestResult` for that example.
+- `runner::execute_request` now returns `HttpResponse` instead
+  of `(status, body)`.
+- Specs without any `Action::HttpRequest` pattern fall back to
+  the pre-2.3 single-request behaviour driven by the frontmatter
+  `api.path` / `api.method` (or `--endpoint` / `--method`), so
+  existing `.feature` files keep working unchanged.
+
 ## [0.3.1] - 2026-05-12
 
 Privacy + packaging follow-up to v0.3.0. No `serval` CLI

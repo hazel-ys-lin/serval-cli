@@ -1,13 +1,13 @@
 //! Step-pattern engine for translating Gherkin step text into runner
 //! actions.
 //!
-//! Today this module is consumed only by [`crate::runner`] through
-//! the [`builtin_patterns`] table — which exactly preserves the
-//! behaviour the runner had before this refactor (no functional
-//! change at Phase 2.1). Phase 2.2 will layer user-defined patterns
-//! on top from a TOML file; Phase 2.3 will let actions fire HTTP
-//! requests directly (multi-step orchestration); Phase 2.4 will add
-//! `AssertBodyMatches` for deep doc-string body comparison.
+//! The Phase 2.1 refactor moved the previously inlined branches of
+//! `runner::process_step` into this table. Phase 2.2 layered
+//! user-defined patterns on top from a TOML file. Phase 2.3 lets
+//! patterns *fire* HTTP requests directly via `Action::HttpRequest`,
+//! turning a scenario from "one frontmatter-driven request" into a
+//! multi-step state machine. Phase 2.4 will add `AssertBodyMatches`
+//! for deep doc-string body comparison.
 //!
 //! Architecture (per project_phase2_pivot memory):
 //! - **Tier 1 (built-in)**: this module, ships with the binary,
@@ -18,17 +18,20 @@
 //! A pattern is `regex + keyword-type filter + action`. When the
 //! regex matches the (placeholder-substituted) step text and the
 //! step's keyword type matches the filter, the action runs against
-//! the scenario's [`crate::runner::StepContext`].
+//! the scenario's [`crate::runner::ScenarioContext`].
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::time::Instant;
 
-use regex::Regex;
+use regex::{Captures, Regex};
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::gherkin::ParsedStep;
-use crate::runner::StepContext;
+use crate::runner::{HttpResponse, ScenarioContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeywordType {
@@ -48,13 +51,26 @@ impl KeywordType {
     }
 }
 
+/// Where a value comes from when a data-driven action fires.
+///
+/// Used by [`Action::HttpRequest::body_from`] today; future
+/// data-driven action variants (header values, query params, …) can
+/// reuse it.
+#[derive(Debug, Clone)]
+pub enum ValueSource {
+    /// Read from a named regex capture group on the step text. The
+    /// pattern's `regex` must declare the group via `(?P<name>…)`.
+    MatchGroup(String),
+    /// Use the step's doc-string. Parsed as JSON if possible;
+    /// otherwise wrapped as a `Value::String`.
+    DocString,
+    /// A constant baked into the pattern definition. No
+    /// templating / substitution at Phase 2.3.
+    Literal(Value),
+}
+
 /// What to do when a pattern's regex matches a step's text and the
 /// keyword filter (if any) accepts it.
-///
-/// At Phase 2.1 every variant is a faithful re-expression of the
-/// pre-refactor `runner::process_step` branches. Phase 2.2+ will
-/// add data-driven variants (`HttpRequest`, `AssertBodyMatches`,
-/// generic capture-group readers, …) that user patterns can target.
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Scan the step text for the first 3-digit number in 100..600
@@ -80,6 +96,16 @@ pub enum Action {
     /// when the example row is an object, clone the row in as the
     /// body.
     SetRequestBodyFromTextOrExampleData,
+
+    /// Fire an HTTP request and append the response to
+    /// [`ScenarioContext::responses`]. `endpoint_template` may
+    /// reference named regex capture groups from the matching
+    /// pattern as `{{name}}`; unknown names expand to empty.
+    HttpRequest {
+        method: String,
+        endpoint_template: String,
+        body_from: Option<ValueSource>,
+    },
 }
 
 #[derive(Debug)]
@@ -147,6 +173,20 @@ enum TomlAction {
     SetHeaderFromWordScan,
     SetQueryParamFromWordScan,
     SetRequestBodyFromTextOrExampleData,
+    HttpRequest {
+        method: String,
+        endpoint_template: String,
+        #[serde(default)]
+        body_from: Option<TomlValueSource>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TomlValueSource {
+    MatchGroup { name: String },
+    DocString,
+    Literal { value: Value },
 }
 
 fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
@@ -171,12 +211,29 @@ fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
         TomlAction::SetRequestBodyFromTextOrExampleData => {
             Action::SetRequestBodyFromTextOrExampleData
         }
+        TomlAction::HttpRequest {
+            method,
+            endpoint_template,
+            body_from,
+        } => Action::HttpRequest {
+            method,
+            endpoint_template,
+            body_from: body_from.map(toml_to_value_source),
+        },
     };
     Ok(StepPattern {
         regex,
         keyword_type,
         action,
     })
+}
+
+fn toml_to_value_source(t: TomlValueSource) -> ValueSource {
+    match t {
+        TomlValueSource::MatchGroup { name } => ValueSource::MatchGroup(name),
+        TomlValueSource::DocString => ValueSource::DocString,
+        TomlValueSource::Literal { value } => ValueSource::Literal(value),
+    }
 }
 
 /// Built-in patterns shipped inside the binary. Reproduces the
@@ -224,15 +281,23 @@ pub fn builtin_patterns() -> Vec<StepPattern> {
 }
 
 /// Apply every pattern whose regex matches `text` and whose keyword
-/// filter accepts `step`. Actions fire against `context` /
-/// `example_data` directly.
-pub fn apply(
+/// filter accepts `step`. Non-HTTP actions mutate `context` /
+/// `example_data` directly; `Action::HttpRequest` fires through
+/// `client` and appends the result to `context.responses`.
+///
+/// Returns `Err` only when an HTTP firing fails at the transport
+/// level (DNS, timeout, connection refused). Assertion-style
+/// failures stay as state on `context` and are checked at
+/// end-of-scenario.
+pub async fn apply(
     patterns: &[StepPattern],
     step: &ParsedStep,
     text: &str,
-    context: &mut StepContext,
+    context: &mut ScenarioContext,
     example_data: &Value,
-) {
+    client: &Client,
+    base_url: &str,
+) -> Result<()> {
     let kt = KeywordType::from_str(&step.keyword_type);
     for pattern in patterns {
         if let Some(required) = pattern.keyword_type
@@ -240,14 +305,66 @@ pub fn apply(
         {
             continue;
         }
-        if !pattern.regex.is_match(text) {
+        let Some(captures) = pattern.regex.captures(text) else {
             continue;
+        };
+        execute_action(
+            &pattern.action,
+            text,
+            &captures,
+            step,
+            context,
+            example_data,
+            client,
+            base_url,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_action(
+    action: &Action,
+    text: &str,
+    captures: &Captures<'_>,
+    step: &ParsedStep,
+    context: &mut ScenarioContext,
+    example_data: &Value,
+    client: &Client,
+    base_url: &str,
+) -> Result<()> {
+    match action {
+        Action::HttpRequest {
+            method,
+            endpoint_template,
+            body_from,
+        } => {
+            fire_http_request(
+                method,
+                endpoint_template,
+                body_from.as_ref(),
+                captures,
+                step,
+                context,
+                client,
+                base_url,
+            )
+            .await
         }
-        execute_action(&pattern.action, text, context, example_data);
+        other => {
+            execute_sync_action(other, text, context, example_data);
+            Ok(())
+        }
     }
 }
 
-fn execute_action(action: &Action, text: &str, context: &mut StepContext, example_data: &Value) {
+fn execute_sync_action(
+    action: &Action,
+    text: &str,
+    context: &mut ScenarioContext,
+    example_data: &Value,
+) {
     match action {
         Action::AssertStatusFromTextScan => {
             if let Some(status) = scan_status_code(text) {
@@ -279,6 +396,98 @@ fn execute_action(action: &Action, text: &str, context: &mut StepContext, exampl
                 context.request_body = Some(example_data.clone());
             }
         }
+        Action::HttpRequest { .. } => {
+            debug_assert!(false, "execute_sync_action called for HttpRequest variant");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fire_http_request(
+    method: &str,
+    endpoint_template: &str,
+    body_from: Option<&ValueSource>,
+    captures: &Captures<'_>,
+    step: &ParsedStep,
+    context: &mut ScenarioContext,
+    client: &Client,
+    base_url: &str,
+) -> Result<()> {
+    let endpoint = substitute_endpoint(endpoint_template, captures);
+    let url = format!("{}{}", base_url.trim_end_matches('/'), endpoint);
+    let parsed_method = parse_method(method)?;
+
+    let mut req = client.request(parsed_method, &url);
+    for (k, v) in &context.request_headers {
+        req = req.header(k, v);
+    }
+
+    let body = body_from.and_then(|src| resolve_value_source(src, step, captures));
+    if let Some(b) = &body {
+        req = req.json(b);
+    }
+
+    let started = Instant::now();
+    let response = req
+        .send()
+        .await
+        .map_err(|e| Error::System(format!("HTTP request failed: {e}")))?;
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let status = response.status().as_u16() as i16;
+    let resp_body = response.json::<Value>().await.unwrap_or(Value::Null);
+
+    context.responses.push(HttpResponse {
+        method: method.to_string(),
+        url,
+        status,
+        body: resp_body,
+        duration_ms,
+    });
+    Ok(())
+}
+
+fn parse_method(method: &str) -> Result<reqwest::Method> {
+    use reqwest::Method;
+    match method.to_uppercase().as_str() {
+        "GET" => Ok(Method::GET),
+        "POST" => Ok(Method::POST),
+        "PUT" => Ok(Method::PUT),
+        "DELETE" => Ok(Method::DELETE),
+        "PATCH" => Ok(Method::PATCH),
+        "HEAD" => Ok(Method::HEAD),
+        "OPTIONS" => Ok(Method::OPTIONS),
+        _ => Err(Error::Spec(format!("Unsupported HTTP method: {method}"))),
+    }
+}
+
+fn substitute_endpoint(template: &str, captures: &Captures<'_>) -> String {
+    static PLACEHOLDER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\{\{(\w+)\}\}").expect("hardcoded regex must compile"));
+    PLACEHOLDER
+        .replace_all(template, |caps: &Captures| {
+            let name = &caps[1];
+            captures
+                .name(name)
+                .map(|m| m.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .into_owned()
+}
+
+fn resolve_value_source(
+    src: &ValueSource,
+    step: &ParsedStep,
+    captures: &Captures<'_>,
+) -> Option<Value> {
+    match src {
+        ValueSource::MatchGroup(name) => captures
+            .name(name)
+            .map(|m| Value::String(m.as_str().to_string())),
+        ValueSource::DocString => step.doc_string.as_deref().map(|s| {
+            serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::String(s.to_string()))
+        }),
+        ValueSource::Literal(v) => Some(v.clone()),
     }
 }
 
@@ -361,17 +570,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_pattern_picks_first_in_range_number() {
+    /// Wraps `apply` with a fake Client + bogus base URL — fine for
+    /// tests that don't exercise `HttpRequest`. Tests that DO need
+    /// HTTP firing should call `apply` directly with an httpmock URL.
+    async fn apply_sync_only(
+        patterns: &[StepPattern],
+        step: &ParsedStep,
+        ctx: &mut ScenarioContext,
+        example_data: &Value,
+    ) {
+        let client = Client::new();
+        apply(
+            patterns,
+            step,
+            &step.text,
+            ctx,
+            example_data,
+            &client,
+            "http://0.0.0.0",
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_pattern_picks_first_in_range_number() {
         let patterns = builtin_patterns();
         for (input, expected) in [
             ("status should be 200", 200_i16),
             ("the status code is 404", 404),
             ("expect 500 error", 500),
         ] {
-            let mut ctx = StepContext::default();
+            let mut ctx = ScenarioContext::default();
             let step = outcome_step(input);
-            apply(&patterns, &step, &step.text, &mut ctx, &Value::Null);
+            apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
             assert_eq!(
                 ctx.expected_status,
                 Some(expected),
@@ -380,67 +612,144 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_pattern_skips_non_outcome_steps() {
+    #[tokio::test]
+    async fn status_pattern_skips_non_outcome_steps() {
         let patterns = builtin_patterns();
         let step = action_step("status should be 200");
-        let mut ctx = StepContext::default();
-        apply(&patterns, &step, &step.text, &mut ctx, &Value::Null);
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
         assert!(ctx.expected_status.is_none());
     }
 
-    #[test]
-    fn body_contains_pattern_extracts_quoted_string() {
+    #[tokio::test]
+    async fn body_contains_pattern_extracts_quoted_string() {
         let patterns = builtin_patterns();
         let step = outcome_step(r#"the body should have "hello world""#);
-        let mut ctx = StepContext::default();
-        apply(&patterns, &step, &step.text, &mut ctx, &Value::Null);
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
         assert_eq!(ctx.expected_body_contains, vec!["hello world".to_string()]);
     }
 
-    #[test]
-    fn header_pattern_inserts_key_value() {
+    #[tokio::test]
+    async fn header_pattern_inserts_key_value() {
         let patterns = builtin_patterns();
         let step = action_step("I set header X-Custom my-token");
-        let mut ctx = StepContext::default();
-        apply(&patterns, &step, &step.text, &mut ctx, &Value::Null);
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
         assert_eq!(
             ctx.request_headers.get("X-Custom").map(String::as_str),
             Some("my-token")
         );
     }
 
-    #[test]
-    fn query_param_pattern_inserts_key_value() {
+    #[tokio::test]
+    async fn query_param_pattern_inserts_key_value() {
         let patterns = builtin_patterns();
         let step = action_step("I set query param page 2");
-        let mut ctx = StepContext::default();
-        apply(&patterns, &step, &step.text, &mut ctx, &Value::Null);
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
         assert_eq!(ctx.query_params.get("page").map(String::as_str), Some("2"));
     }
 
-    #[test]
-    fn body_cue_falls_back_to_example_data() {
+    #[tokio::test]
+    async fn body_cue_falls_back_to_example_data() {
         let patterns = builtin_patterns();
         let step = action_step("I POST /users with body");
-        let mut ctx = StepContext::default();
+        let mut ctx = ScenarioContext::default();
         let example = serde_json::json!({"email": "a@b.c"});
-        apply(&patterns, &step, &step.text, &mut ctx, &example);
+        apply_sync_only(&patterns, &step, &mut ctx, &example).await;
         assert_eq!(ctx.request_body, Some(example));
     }
 
-    #[test]
-    fn body_cue_does_not_overwrite_existing_body() {
+    #[tokio::test]
+    async fn body_cue_does_not_overwrite_existing_body() {
         let patterns = builtin_patterns();
         let step = action_step("I POST /users with body");
         let pre_set = serde_json::json!({"prior": true});
-        let mut ctx = StepContext {
+        let mut ctx = ScenarioContext {
             request_body: Some(pre_set.clone()),
             ..Default::default()
         };
         let example = serde_json::json!({"email": "a@b.c"});
-        apply(&patterns, &step, &step.text, &mut ctx, &example);
+        apply_sync_only(&patterns, &step, &mut ctx, &example).await;
         assert_eq!(ctx.request_body, Some(pre_set));
+    }
+
+    // ---- ValueSource + endpoint template helpers ----
+
+    #[test]
+    fn endpoint_template_substitutes_named_groups() {
+        let re = Regex::new(r"^id=(?P<id>\w+)$").unwrap();
+        let caps = re.captures("id=alice").unwrap();
+        assert_eq!(substitute_endpoint("/users/{{id}}", &caps), "/users/alice");
+        assert_eq!(
+            substitute_endpoint("/{{id}}/posts/{{id}}", &caps),
+            "/alice/posts/alice"
+        );
+    }
+
+    #[test]
+    fn endpoint_template_unknown_group_expands_to_empty() {
+        let re = Regex::new(r"^id=(?P<id>\w+)$").unwrap();
+        let caps = re.captures("id=alice").unwrap();
+        assert_eq!(substitute_endpoint("/users/{{missing}}", &caps), "/users/");
+    }
+
+    #[test]
+    fn endpoint_template_no_placeholders_passes_through() {
+        let re = Regex::new(r"^foo$").unwrap();
+        let caps = re.captures("foo").unwrap();
+        assert_eq!(substitute_endpoint("/static/path", &caps), "/static/path");
+    }
+
+    #[test]
+    fn value_source_match_group_resolves() {
+        let re = Regex::new(r"name=(?P<name>\w+)").unwrap();
+        let caps = re.captures("name=bob").unwrap();
+        let step = action_step("");
+        let resolved =
+            resolve_value_source(&ValueSource::MatchGroup("name".to_string()), &step, &caps);
+        assert_eq!(resolved, Some(Value::String("bob".to_string())));
+    }
+
+    #[test]
+    fn value_source_match_group_missing_resolves_to_none() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let step = action_step("");
+        let resolved =
+            resolve_value_source(&ValueSource::MatchGroup("nope".to_string()), &step, &caps);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn value_source_doc_string_parses_json() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"a":1}"#.to_string());
+        let resolved = resolve_value_source(&ValueSource::DocString, &step, &caps);
+        assert_eq!(resolved, Some(serde_json::json!({"a": 1})));
+    }
+
+    #[test]
+    fn value_source_doc_string_falls_back_to_string_on_invalid_json() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some("not json".to_string());
+        let resolved = resolve_value_source(&ValueSource::DocString, &step, &caps);
+        assert_eq!(resolved, Some(Value::String("not json".to_string())));
+    }
+
+    #[test]
+    fn value_source_literal_clones() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let step = action_step("");
+        let v = serde_json::json!({"hardcoded": true});
+        let resolved = resolve_value_source(&ValueSource::Literal(v.clone()), &step, &caps);
+        assert_eq!(resolved, Some(v));
     }
 
     // ---- TOML loader tests ----
@@ -513,10 +822,82 @@ type = "set_query_param_from_word_scan"
 regex = '\bE\b'
 [pattern.action]
 type = "set_request_body_from_text_or_example_data"
+
+[[pattern]]
+regex = '\bF\b'
+[pattern.action]
+type = "http_request"
+method = "POST"
+endpoint_template = "/x"
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
-        assert_eq!(patterns.len(), 5);
+        assert_eq!(patterns.len(), 6);
+        assert!(matches!(
+            patterns[5].action,
+            Action::HttpRequest { ref method, .. } if method == "POST"
+        ));
+    }
+
+    #[test]
+    fn load_from_file_parses_http_request_with_body_from_match_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "http.toml",
+            r#"
+[[pattern]]
+regex = '(?i)create user "(?P<name>[^"]+)"'
+keyword_type = "Action"
+[pattern.action]
+type = "http_request"
+method = "POST"
+endpoint_template = "/users"
+body_from = { kind = "match_group", name = "name" }
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        assert_eq!(patterns.len(), 1);
+        match &patterns[0].action {
+            Action::HttpRequest {
+                method,
+                endpoint_template,
+                body_from,
+            } => {
+                assert_eq!(method, "POST");
+                assert_eq!(endpoint_template, "/users");
+                assert!(matches!(body_from, Some(ValueSource::MatchGroup(s)) if s == "name"));
+            }
+            other => panic!("expected HttpRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_http_request_with_body_from_literal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "lit.toml",
+            r#"
+[[pattern]]
+regex = '\bcreate\b'
+[pattern.action]
+type = "http_request"
+method = "POST"
+endpoint_template = "/x"
+body_from = { kind = "literal", value = { hello = "world" } }
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        match &patterns[0].action {
+            Action::HttpRequest {
+                body_from: Some(ValueSource::Literal(v)),
+                ..
+            } => {
+                assert_eq!(v, &serde_json::json!({"hello": "world"}));
+            }
+            other => panic!("expected HttpRequest with literal body_from, got {other:?}"),
+        }
     }
 
     #[test]

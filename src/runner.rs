@@ -8,6 +8,14 @@
 //! - [`ApiSpec`] is the API endpoint + HTTP method.
 //! - [`EnvSpec`] is the target base URL.
 //!
+//! Phase 2.3 makes the runner multi-step: a scenario can fire
+//! multiple HTTP requests via `Action::HttpRequest` patterns,
+//! recorded as [`HttpResponse`] entries on the
+//! [`ScenarioContext`]. Validation runs against the *last* response.
+//! Scenarios that never trigger an `HttpRequest` pattern fall back
+//! to the pre-2.3 behaviour — a single frontmatter-driven request
+//! at end-of-scenario — so existing specs keep working unchanged.
+//!
 //! Test-assertion failures (status / body mismatch) come back as
 //! `pass: false` on a [`TestResult`] — they are **not** `Result::Err`.
 //! `Result::Err` is reserved for spec / infrastructure problems
@@ -68,9 +76,25 @@ pub struct TestResult {
     pub request_time: time::OffsetDateTime,
 }
 
-/// Context built up from Gherkin steps before firing the request.
+/// A single HTTP exchange recorded during scenario execution. The
+/// runner appends one per HTTP request fired — whether by an
+/// `Action::HttpRequest` pattern firing mid-scenario or by the
+/// implicit frontmatter-driven fallback at end-of-scenario.
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub method: String,
+    pub url: String,
+    pub status: i16,
+    pub body: serde_json::Value,
+    pub duration_ms: i64,
+}
+
+/// Mutable state accumulated across a scenario's steps. Filled by
+/// the step-pattern engine ([`patterns::apply`]) as each step is
+/// processed; consumed at end-of-scenario for the implicit fallback
+/// request and response validation.
 #[derive(Debug, Clone, Default)]
-pub struct StepContext {
+pub struct ScenarioContext {
     pub request_body: Option<serde_json::Value>,
     pub request_headers: HashMap<String, String>,
     pub query_params: HashMap<String, String>,
@@ -81,6 +105,12 @@ pub struct StepContext {
     /// Data table from a step (used as setup data; not currently
     /// asserted against).
     pub setup_data: Option<Vec<serde_json::Value>>,
+    /// HTTP responses recorded by `Action::HttpRequest` patterns
+    /// firing during step processing. If still empty after all
+    /// steps run, the runner falls back to firing one implicit
+    /// request driven by the spec's frontmatter `api.path` /
+    /// `api.method` (backward compatible with Phase 2.2 specs).
+    pub responses: Vec<HttpResponse>,
 }
 
 pub struct TestRunner {
@@ -160,55 +190,78 @@ impl TestRunner {
         let request_time = time::OffsetDateTime::now_utc();
         let start = Instant::now();
 
-        let mut context = StepContext {
+        let mut context = ScenarioContext {
             expected_status: example.expected_status_code,
             ..Default::default()
         };
 
+        let mut step_failure: Option<String> = None;
         for step in &scenario.steps {
-            self.process_step(&mut context, step, &example.data);
+            if let Err(e) = self
+                .process_step(&mut context, step, env, &example.data)
+                .await
+            {
+                step_failure = Some(e.to_string());
+                break;
+            }
         }
 
-        let result = self
-            .execute_request(api, env, &context, &example.data)
-            .await;
+        // Backward-compatible fallback: if no `Action::HttpRequest`
+        // pattern fired during the scenario, run the implicit
+        // frontmatter-driven request now. This preserves the pre-2.3
+        // single-request behaviour for specs that don't use the new
+        // pattern engine.
+        if step_failure.is_none() && context.responses.is_empty() {
+            match self
+                .execute_request(api, env, &context, &example.data)
+                .await
+            {
+                Ok(resp) => context.responses.push(resp),
+                Err(e) => step_failure = Some(e.to_string()),
+            }
+        }
 
         let duration = start.elapsed().as_millis() as i64;
 
-        match result {
-            Ok((status, body)) => {
-                let validation = self.validate_response(status, &body, &context);
-
-                TestResult {
-                    scenario_title: scenario.title.clone(),
-                    example_index,
-                    pass: validation.is_ok(),
-                    error_message: validation.err(),
-                    response_status: status,
-                    response_data: Some(body),
-                    request_duration_ms: duration,
-                    request_time,
-                }
-            }
-            Err(e) => TestResult {
+        if let Some(err) = step_failure {
+            return TestResult {
                 scenario_title: scenario.title.clone(),
                 example_index,
                 pass: false,
-                error_message: Some(e.to_string()),
+                error_message: Some(err),
                 response_status: 0,
                 response_data: None,
                 request_duration_ms: duration,
                 request_time,
-            },
+            };
+        }
+
+        let last = context
+            .responses
+            .last()
+            .expect("responses non-empty after fallback")
+            .clone();
+        let validation = self.validate_response(last.status, &last.body, &context);
+
+        TestResult {
+            scenario_title: scenario.title.clone(),
+            example_index,
+            pass: validation.is_ok(),
+            error_message: validation.err(),
+            response_status: last.status,
+            response_data: Some(last.body),
+            request_duration_ms: duration,
+            request_time,
         }
     }
 
-    fn process_step(
+    async fn process_step(
         &self,
-        context: &mut StepContext,
+        context: &mut ScenarioContext,
         step: &ParsedStep,
+        env: &EnvSpec,
         example_data: &serde_json::Value,
-    ) {
+    ) -> Result<()> {
         let text = self.substitute_placeholders(&step.text, example_data);
 
         // Doc string: always attempt to parse as JSON → request body.
@@ -235,8 +288,17 @@ impl TestRunner {
         }
 
         // Text-driven actions: status codes, headers, query params,
-        // body cues, … Pattern engine handles all of it.
-        patterns::apply(&self.patterns, step, &text, context, example_data);
+        // body cues, HTTP firing. Pattern engine handles all of it.
+        patterns::apply(
+            &self.patterns,
+            step,
+            &text,
+            context,
+            example_data,
+            &self.client,
+            &env.base_url,
+        )
+        .await
     }
 
     fn substitute_placeholders(&self, text: &str, example_data: &serde_json::Value) -> String {
@@ -260,7 +322,7 @@ impl TestRunner {
 
     fn build_request_body(
         &self,
-        context: &StepContext,
+        context: &ScenarioContext,
         example_data: &serde_json::Value,
     ) -> Option<serde_json::Value> {
         if let Some(body) = &context.request_body {
@@ -284,9 +346,9 @@ impl TestRunner {
         &self,
         api: &ApiSpec,
         env: &EnvSpec,
-        context: &StepContext,
+        context: &ScenarioContext,
         example_data: &serde_json::Value,
-    ) -> Result<(i16, serde_json::Value)> {
+    ) -> Result<HttpResponse> {
         let endpoint = self.substitute_placeholders(&api.endpoint, example_data);
         let mut url = format!("{}{}", env.base_url.trim_end_matches('/'), endpoint);
 
@@ -335,22 +397,29 @@ impl TestRunner {
             request = request.json(&body);
         }
 
+        let started = Instant::now();
         let response: Response = request
             .send()
             .await
             .map_err(|e| Error::System(format!("HTTP request failed: {e}")))?;
-
+        let duration_ms = started.elapsed().as_millis() as i64;
         let status = response.status().as_u16() as i16;
         let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
 
-        Ok((status, body))
+        Ok(HttpResponse {
+            method: api.http_method.to_uppercase(),
+            url,
+            status,
+            body,
+            duration_ms,
+        })
     }
 
     fn validate_response(
         &self,
         status: i16,
         body: &serde_json::Value,
-        context: &StepContext,
+        context: &ScenarioContext,
     ) -> std::result::Result<(), String> {
         if let Some(expected_status) = context.expected_status
             && status != expected_status
