@@ -11,6 +11,21 @@ any minor or pre-release bump.
 
 ### Added
 
+- **Phase 2.5** — first end-to-end dogfood of the step-pattern
+  engine. `examples/event-sourcing.toml` ships a happy-path
+  user-pattern set that lets event-sourcing-style codegen Gherkin
+  (using the
+  `Given the <Event> event has occurred on stream "<id>":` /
+  `When <Actor> sends <Command> on stream "<id>":` /
+  `When the <View> view is queried` /
+  `Then the <Event> event is emitted with:` /
+  `Then the view returns:` convention) run verbatim against a
+  backend exposing `POST /streams/{id}/events/{Event}`,
+  `POST /streams/{id}/commands/{Cmd}`, and `GET /views/{View}`.
+- Integration test `tests/dogfood_event_sourcing.rs` runs three
+  scenarios (a list-view deep-match, a command with emitted-event
+  assertion, and an empty-event assertion) against an in-process
+  httpmock backend using the example patterns unchanged.
 - **Phase 2.4** — `Then` step doc-string drives `expected_body`.
   New built-in pattern `AssertBodyMatches` parses a triple-quoted
   block on a `Then` step as JSON and runs a deep partial match

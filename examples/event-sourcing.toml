@@ -1,0 +1,77 @@
+# Step patterns for event-sourcing-style codegen Gherkin.
+#
+# Target audience: backends that accept an event-store-shaped HTTP
+# API, i.e.
+#   - `POST /streams/{streamId}/events/{eventType}` to seed an
+#     event onto a stream.
+#   - `POST /streams/{streamId}/commands/{commandName}` to dispatch
+#     a command; the response body is the emitted event.
+#   - `GET  /views/{viewName}` to query a projection.
+#
+# Drop this file at `~/.serval/patterns.toml` (or pass via
+# `--patterns-file examples/event-sourcing.toml`) and the CLI
+# will run codegen Gherkin written in this convention verbatim
+# against that shape.
+#
+# Coverage: happy-path step types only. Failure-mode steps
+# ("Then the operation fails with: ...") are not yet handled.
+
+# --- Setup steps (Given / And) ---
+
+# `Given the <EventName> event has occurred on stream "<id>":` + doc string
+#   → POST /streams/{id}/events/{EventName}
+#   Body is the doc-string JSON.
+[[pattern]]
+regex = '(?i)the (?P<event>\w+) event has occurred on stream "(?P<stream>[^"]+)"'
+keyword_type = "Context"
+[pattern.action]
+type = "http_request"
+method = "POST"
+endpoint_template = "/streams/{{stream}}/events/{{event}}"
+body_from = { kind = "doc_string" }
+
+# `Given the external event arrives via <Translator> on stream "<id>":` + doc string
+#   → POST /streams/{id}/translators/{Translator}
+[[pattern]]
+regex = '(?i)the external event arrives via (?P<translator>\w+) on stream "(?P<stream>[^"]+)"'
+keyword_type = "Context"
+[pattern.action]
+type = "http_request"
+method = "POST"
+endpoint_template = "/streams/{{stream}}/translators/{{translator}}"
+body_from = { kind = "doc_string" }
+
+# --- Action steps (When) ---
+
+# `When <Actor> sends <Command> on stream "<id>":` + doc string
+#   → POST /streams/{id}/commands/{Command}
+#   <Actor> is captured but not propagated — auth headers are a
+#   separate concern; for codegen happy-path fixtures the mock
+#   backend accepts any caller.
+[[pattern]]
+regex = '(?i)(?P<actor>\w+) sends (?P<cmd>\w+) on stream "(?P<stream>[^"]+)"'
+keyword_type = "Action"
+[pattern.action]
+type = "http_request"
+method = "POST"
+endpoint_template = "/streams/{{stream}}/commands/{{cmd}}"
+body_from = { kind = "doc_string" }
+
+# `When the <View> view is queried`
+#   → GET /views/{View}
+[[pattern]]
+regex = '(?i)the (?P<view>\w+) view is queried'
+keyword_type = "Action"
+[pattern.action]
+type = "http_request"
+method = "GET"
+endpoint_template = "/views/{{view}}"
+
+# --- Assertion steps (Then) ---
+#
+# `Then the <EventName> event is emitted with:` + doc string
+# `Then the view returns:` + doc string
+#   → handled by the built-in `AssertBodyMatches` pattern: every
+#   `Then` step with a doc string parses it as JSON and runs a
+#   deep partial match against the last response. No custom
+#   pattern needed here.
