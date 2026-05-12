@@ -9,6 +9,31 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-12
+
+Phase 0 (lite-native CLI scaffold) and Phase 1 (CLI primary
+interface) complete. Version line continues from `serval-run-v2`
+v0.2.0 — the binary is now `serval` and lives in this CLI-focused
+repo. Phase 2 (specs as git source of truth, manifest lockfile) is
+next per the roadmap.
+
+The full subcommand surface as of v0.3.0:
+
+```text
+serval status                                 (placeholder)
+serval run <path> [--env NAME | --base-url URL] [--endpoint P]
+                  [--method M] [--report-dir DIR] [--no-report]
+                  [--json]
+serval history [--limit N] [--report-dir DIR] [--json]
+serval diff <before-id> <after-id> [--report-dir DIR] [--json]
+serval api {list, show <pattern>, find <query>} [--dir DIR] [--json]
+serval env {list, show NAME, set NAME --base-url URL
+            [--make-default], remove NAME} [--config-file PATH]
+            [--json]
+serval config {path, show} [--config-file PATH] [--json]
+serval spec validate [<path>] [--json]
+```
+
 ### Added
 
 - CLI-focused `Cargo.toml` dependency set: clap 4 (derive + env),
@@ -266,5 +291,6 @@ rationale.
 - `LICENSE` (MIT).
 - `.gitignore`.
 
-[Unreleased]: https://github.com/hazel-ys-lin/serval-cli/compare/v0.1.0-alpha.0...HEAD
+[Unreleased]: https://github.com/hazel-ys-lin/serval-cli/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/hazel-ys-lin/serval-cli/releases/tag/v0.3.0
 [0.1.0-alpha.0]: https://github.com/hazel-ys-lin/serval-cli/releases/tag/v0.1.0-alpha.0
