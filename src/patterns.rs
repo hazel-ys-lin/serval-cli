@@ -727,9 +727,19 @@ async fn fire_http_request(
     // pulls a value out of the response body via RFC 6901 and stores
     // it on the scenario context under `name` for subsequent steps to
     // reference via `{{$name}}` or `ValueSource::Variable`.
-    for (var_name, pointer) in capture_response {
+    //
+    // Phase 3.6: the capture key itself is template-substituted at
+    // capture time. A pattern matching `Given ... on stream
+    // "(?P<stream>...)"` can declare `capture_response = {
+    // "user_for_{{stream}}" = "/id" }` and the variable lands under
+    // a key derived from the step's stream id (e.g.
+    // `user_for_acc-001`). Pairs with two-pass `substitute_template`
+    // so a later step can reference the value as
+    // `{{$user_for_{{stream}}}}`.
+    for (var_name_template, pointer) in capture_response {
         if let Some(captured) = resp_body.pointer(pointer) {
-            context.variables.insert(var_name.clone(), captured.clone());
+            let var_name = substitute_template(var_name_template, captures, &context.variables);
+            context.variables.insert(var_name, captured.clone());
         }
     }
 
@@ -773,23 +783,35 @@ fn substitute_template(
     captures: &Captures<'_>,
     variables: &HashMap<String, Value>,
 ) -> String {
-    static PLACEHOLDER: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\{\{(\$)?(\w+)\}\}").expect("hardcoded regex must compile"));
-    PLACEHOLDER
-        .replace_all(template, |caps: &Captures| {
-            let is_var = caps.get(1).is_some();
-            let name = &caps[2];
-            if is_var {
-                match variables.get(name) {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => other.to_string(),
-                    None => String::new(),
-                }
-            } else {
-                captures
-                    .name(name)
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_default()
+    // Phase 3.6: two-pass substitution lets a template nest a
+    // capture inside a variable name —
+    //   `/users/delete/{{$user_for_{{stream}}}}`
+    // resolves first to `/users/delete/{{$user_for_acc-001}}` (pass
+    // 1, regex captures) and then to the stored UUID (pass 2,
+    // scenario variables). The two passes intentionally use
+    // disjoint name shapes: `{{name}}` for captures, `{{$name}}`
+    // for variables. Hyphen / dot / colon are allowed inside names
+    // so stream ids like `acc-001` round-trip through the variable
+    // key.
+    static CAPTURES_PASS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\{\{([\w.\-:]+)\}\}").expect("hardcoded regex must compile"));
+    static VARIABLES_PASS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\{\{\$([\w.\-:]+)\}\}").expect("hardcoded regex must compile")
+    });
+    let after_captures = CAPTURES_PASS.replace_all(template, |caps: &Captures| {
+        let name = &caps[1];
+        captures
+            .name(name)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
+    });
+    VARIABLES_PASS
+        .replace_all(&after_captures, |caps: &Captures| {
+            let name = &caps[1];
+            match variables.get(name) {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
             }
         })
         .into_owned()
@@ -1401,6 +1423,57 @@ mod tests {
         assert_eq!(
             substitute_template("/{{$tenant}}/users/{{id}}", &caps, &vars),
             "/acme/users/alice"
+        );
+    }
+
+    #[test]
+    fn template_allows_hyphen_in_variable_name() {
+        // Phase 3.6: stream ids like `acc-001` end up baked into
+        // variable names. Hyphen / dot / colon are allowed inside
+        // `{{name}}` / `{{$name}}`.
+        let re = Regex::new(r"^x$").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert(
+            "user_for_acc-001".to_string(),
+            Value::String("019e1f4d-3c69".to_string()),
+        );
+        assert_eq!(
+            substitute_template("/users/delete/{{$user_for_acc-001}}", &caps, &vars),
+            "/users/delete/019e1f4d-3c69"
+        );
+    }
+
+    #[test]
+    fn template_two_pass_resolves_nested_capture_inside_variable() {
+        // Phase 3.6: a template can nest a regex capture inside a
+        // variable name. Pass 1 substitutes the inner capture; pass
+        // 2 substitutes the resulting variable name.
+        let re = Regex::new(r#""(?P<stream>[^"]+)""#).unwrap();
+        let caps = re.captures(r#"stream "acc-001""#).unwrap();
+        let mut vars = HashMap::new();
+        vars.insert(
+            "user_for_acc-001".to_string(),
+            Value::String("019e1f4d".to_string()),
+        );
+        assert_eq!(
+            substitute_template("/users/delete/{{$user_for_{{stream}}}}", &caps, &vars),
+            "/users/delete/019e1f4d"
+        );
+    }
+
+    #[test]
+    fn template_two_pass_unknown_variable_after_capture_expansion() {
+        // Capture resolves, variable doesn't exist → empty.
+        let re = Regex::new(r#""(?P<stream>[^"]+)""#).unwrap();
+        let caps = re.captures(r#"stream "acc-001""#).unwrap();
+        assert_eq!(
+            substitute_template(
+                "/users/delete/{{$user_for_{{stream}}}}",
+                &caps,
+                &empty_vars()
+            ),
+            "/users/delete/"
         );
     }
 

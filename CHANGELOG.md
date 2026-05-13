@@ -90,6 +90,23 @@ any minor or pre-release bump.
   - The unsuccessful response is still recorded on
     `ScenarioContext.responses` so post-mortem reports show
     what the backend returned.
+- **Phase 3.6** — stream-id symbol table via templated
+  `capture_response` keys + two-pass `substitute_template`.
+  Closes the stream-id ↔ backend-UUID gap that blocked update /
+  delete patterns from referencing seeded entities by their
+  Gherkin stream id.
+  - `capture_response` keys are now template-substituted at
+    capture time. A seed pattern can declare
+    `capture_response = { "user_for_{{stream}}" = "/id" }` and
+    the captured UUID lands under a key derived from the step's
+    `stream` regex capture (e.g. `user_for_acc-001`).
+  - `substitute_template` runs two passes — regex captures
+    (`{{name}}`) first, scenario variables (`{{$name}}`) second
+    — so a later step can nest a capture inside a variable name
+    (`endpoint_template = "/users/delete/{{$user_for_{{stream}}}}"`).
+  - Allowed characters inside template names expanded from
+    `\w+` to `[\w.\-:]+` so stream ids like `acc-001` round-trip
+    through the variable key.
 
 ### Changed
 

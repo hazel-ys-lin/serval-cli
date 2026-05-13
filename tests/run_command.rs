@@ -990,6 +990,99 @@ fn run_accepted_status_unlisted_code_fails_the_scenario() {
 }
 
 #[test]
+fn run_stream_id_symbol_table_chains_seed_capture_into_delete() {
+    // Phase 3.6: closes the stream-id ↔ UUID gap.
+    //
+    // Seed pattern captures the backend-assigned UUID under a
+    // variable whose name embeds the Gherkin stream id
+    // (`user_for_{{stream}}`). The delete pattern then references
+    // that same variable through a nested template
+    // (`{{$user_for_{{stream}}}}`), so the request lands at
+    // /users/delete/<UUID> rather than /users/delete/acc-001.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/users/create");
+        then.status(201)
+            .json_body(json!({"id": "019e1f4d-3c69", "account": "coach"}));
+    });
+    server.mock(|when, then| {
+        when.method(Method::DELETE)
+            .path("/users/delete/019e1f4d-3c69");
+        then.status(204);
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        concat!(
+            "[[pattern]]\n",
+            "regex = '(?i)the AccountCreated event has occurred on stream \"(?P<stream>[^\"]+)\"'\n",
+            "keyword_type = \"Context\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"POST\"\n",
+            "endpoint_template = \"/users/create\"\n",
+            "capture_response = { \"user_for_{{stream}}\" = \"/id\" }\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)Coach sends DeleteAccount on stream \"(?P<stream>[^\"]+)\"'\n",
+            "keyword_type = \"Action\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"DELETE\"\n",
+            "endpoint_template = \"/users/delete/{{$user_for_{{stream}}}}\"\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)the AccountDeleted event is emitted'\n",
+            "keyword_type = \"Outcome\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"assert_status_from_text_scan\"\n",
+        ),
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("stream-id.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: Stream id chain\n",
+            "  Scenario: Delete by captured UUID\n",
+            "    Given the AccountCreated event has occurred on stream \"acc-001\":\n",
+            "      \"\"\"\n",
+            "      {\"name\": \"coach\"}\n",
+            "      \"\"\"\n",
+            "    When Coach sends DeleteAccount on stream \"acc-001\":\n",
+            "      \"\"\"\n",
+            "      {}\n",
+            "      \"\"\"\n",
+            "    Then status should be 204\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--endpoint",
+            "/placeholder",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+#[test]
 fn run_captures_response_field_into_scenario_variable() {
     // Phase 3.0: a login pattern captures `/access_token` from the
     // response body; a subsequent pattern reads it via `{{$token}}`
