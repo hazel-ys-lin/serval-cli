@@ -59,6 +59,21 @@ any minor or pre-release bump.
     source; defaults to JSON null (no overrides).
   - Non-object `overrides` is silently treated as empty,
     matching the existing tolerance for non-object `defaults`.
+- **Phase 3.4** — `Action::AssertBodyMatchesAt { pointer }` plus
+  `ScenarioContext.expected_body_pointer`. Scopes the doc-string
+  deep-partial match to a JSON sub-document (RFC 6901 pointer)
+  of the response body, closing the wire-shape gap when codegen
+  Gherkin asserts a bare collection (`Then the view returns:
+  [...]`) but the backend wraps it (`{users: [...]}` from
+  v2's `GET /users/list`).
+  - TOML: `[[pattern.actions]] type = "assert_body_matches_at"
+    pointer = "/users"`.
+  - Overwrites whatever the built-in `AssertBodyMatches` set on
+    the same step — user patterns fire after built-ins, so the
+    scoped form always wins when both apply.
+  - Same vacuous-`{}` skip as `AssertBodyMatches` (Phase 3.2).
+  - Validator surfaces a clear `Pointer /xyz resolved to nothing`
+    failure when the pointer doesn't exist in the response.
 
 ### Changed
 

@@ -136,6 +136,12 @@ pub struct ScenarioContext {
     pub path_params: HashMap<String, String>,
     pub expected_status: Option<StatusMatcher>,
     pub expected_body: Option<serde_json::Value>,
+    /// Optional JSON pointer (RFC 6901) scoping `expected_body`'s
+    /// deep-partial match to a sub-document of the response body.
+    /// Set by `Action::AssertBodyMatchesAt`. When `None`, the match
+    /// runs against the whole response body (the default
+    /// `AssertBodyMatches` behaviour).
+    pub expected_body_pointer: Option<String>,
     pub expected_body_contains: Vec<String>,
     /// Data table from a step (used as setup data; not currently
     /// asserted against).
@@ -469,11 +475,30 @@ impl TestRunner {
 
         if let Some(expected_body) = &context.expected_body
             && !expected_body.is_null()
-            && !self.json_contains(body, expected_body)
         {
-            return Err(format!(
-                "Response body does not match expected. Expected: {expected_body}, Got: {body}"
-            ));
+            let actual: &serde_json::Value = match &context.expected_body_pointer {
+                Some(ptr) => match body.pointer(ptr) {
+                    Some(sub) => sub,
+                    None => {
+                        return Err(format!(
+                            "Response body does not match expected. \
+                             Pointer {ptr} resolved to nothing in body: {body}"
+                        ));
+                    }
+                },
+                None => body,
+            };
+            if !self.json_contains(actual, expected_body) {
+                return Err(match &context.expected_body_pointer {
+                    Some(ptr) => format!(
+                        "Response body does not match expected at pointer {ptr}. \
+                         Expected: {expected_body}, Got: {actual}"
+                    ),
+                    None => format!(
+                        "Response body does not match expected. Expected: {expected_body}, Got: {body}"
+                    ),
+                });
+            }
         }
 
         Ok(())

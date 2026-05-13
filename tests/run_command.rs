@@ -689,6 +689,156 @@ fn run_empty_doc_string_paired_with_status_assertion_still_passes() {
 }
 
 #[test]
+fn run_assert_body_matches_at_scopes_partial_match_to_pointer() {
+    // Phase 3.4: the wire-shape gap. v2-style backend returns
+    // `{users: [...]}` but codegen Gherkin's `Then the view
+    // returns: [...]` asserts against a bare array. Without
+    // pointer scoping, the deep-match fails (object vs array
+    // at root). The user-supplied AssertBodyMatchesAt pattern
+    // scopes the comparison to /users.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/users/list");
+        then.status(200).json_body(json!({
+            "users": [
+                {"name": "Alice", "extra": "ignored-by-partial-match"},
+                {"name": "Bob"},
+            ]
+        }));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        concat!(
+            "[[pattern]]\n",
+            "regex = '(?i)the AccountList view is queried'\n",
+            "keyword_type = \"Action\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"GET\"\n",
+            "endpoint_template = \"/users/list\"\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)the view returns'\n",
+            "keyword_type = \"Outcome\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"assert_body_matches_at\"\n",
+            "pointer = \"/users\"\n",
+        ),
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("view.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: View partial-match\n",
+            "  Scenario: AccountList view returns wrapped\n",
+            "    When the AccountList view is queried\n",
+            "    Then the view returns:\n",
+            "      \"\"\"\n",
+            "      [{\"name\": \"Alice\"}]\n",
+            "      \"\"\"\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--endpoint",
+            "/placeholder",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+#[test]
+fn run_assert_body_matches_at_fails_when_pointer_missing() {
+    // Negative case: the pointer doesn't resolve in the response.
+    // Validator should report a clear pointer-missing error rather
+    // than vacuously passing or panicking.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::GET).path("/users/list");
+        then.status(200).json_body(json!({"unexpected": "shape"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        concat!(
+            "[[pattern]]\n",
+            "regex = '(?i)the AccountList view is queried'\n",
+            "keyword_type = \"Action\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"GET\"\n",
+            "endpoint_template = \"/users/list\"\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)the view returns'\n",
+            "keyword_type = \"Outcome\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"assert_body_matches_at\"\n",
+            "pointer = \"/users\"\n",
+        ),
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("view-missing.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: View pointer missing\n",
+            "  Scenario: pointer does not resolve\n",
+            "    When the AccountList view is queried\n",
+            "    Then the view returns:\n",
+            "      \"\"\"\n",
+            "      [{\"name\": \"Alice\"}]\n",
+            "      \"\"\"\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--endpoint",
+            "/placeholder",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains(
+            "Pointer /users resolved to nothing",
+        ));
+}
+
+#[test]
 fn run_captures_response_field_into_scenario_variable() {
     // Phase 3.0: a login pattern captures `/access_token` from the
     // response body; a subsequent pattern reads it via `{{$token}}`

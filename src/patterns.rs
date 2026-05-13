@@ -140,6 +140,16 @@ pub enum Action {
     /// parsing fails. Used by the built-in `Then` pattern.
     AssertBodyMatches,
 
+    /// Like `AssertBodyMatches`, but scope the deep-match to a
+    /// sub-document of the response selected by a JSON pointer
+    /// (RFC 6901). Closes the wire-shape gap when the codegen
+    /// Gherkin doc-string is a bare collection but the backend
+    /// wraps it (`{users: [...]}` from v2's `GET /users/list`
+    /// vs Gherkin's `[...]`). Overwrites whatever the built-in
+    /// `AssertBodyMatches` set on the same step — user patterns
+    /// fire after built-ins, so the scoped form wins on collision.
+    AssertBodyMatchesAt { pointer: String },
+
     /// Set `expected_status` to a closed range `[min, max]`. Used
     /// by user patterns that need to assert "any 4xx" without
     /// pinning to a specific status code (e.g. failure-mode steps
@@ -270,6 +280,9 @@ enum TomlAction {
     SetRequestBodyFromTextOrExampleData,
     SetRequestBodyFromDocString,
     AssertBodyMatches,
+    AssertBodyMatchesAt {
+        pointer: String,
+    },
     AssertExpectedStatusInRange {
         min: i16,
         max: i16,
@@ -350,6 +363,7 @@ fn toml_to_action(t: TomlAction) -> Action {
         }
         TomlAction::SetRequestBodyFromDocString => Action::SetRequestBodyFromDocString,
         TomlAction::AssertBodyMatches => Action::AssertBodyMatches,
+        TomlAction::AssertBodyMatchesAt { pointer } => Action::AssertBodyMatchesAt { pointer },
         TomlAction::AssertExpectedStatusInRange { min, max } => {
             Action::AssertExpectedStatusInRange { min, max }
         }
@@ -611,6 +625,17 @@ fn execute_sync_action(
                     && !is_vacuous_expected_body(&json)
                 {
                     context.expected_body = Some(json);
+                }
+            }
+        }
+        Action::AssertBodyMatchesAt { pointer } => {
+            if let Some(doc) = &step.doc_string {
+                let substituted = substitute_placeholders(doc, example_data);
+                if let Ok(json) = serde_json::from_str::<Value>(&substituted)
+                    && !is_vacuous_expected_body(&json)
+                {
+                    context.expected_body = Some(json);
+                    context.expected_body_pointer = Some(pointer.clone());
                 }
             }
         }
@@ -1040,6 +1065,77 @@ mod tests {
         apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
         assert_eq!(ctx.expected_status, Some(StatusMatcher::Exact(200)));
         assert!(ctx.expected_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn assert_body_matches_at_sets_expected_body_and_pointer() {
+        // Phase 3.4: scopes the deep-match to a JSON sub-document.
+        // Mirrors the v2 AccountList case where Gherkin's `Then
+        // the view returns: [...]` should compare against the
+        // response's `/users` sub-array rather than the whole body.
+        let pattern = StepPattern {
+            regex: Regex::new(r"(?i)the view returns").unwrap(),
+            keyword_type: Some(KeywordType::Outcome),
+            actions: vec![Action::AssertBodyMatchesAt {
+                pointer: "/users".to_string(),
+            }],
+        };
+        let mut step = outcome_step("the view returns");
+        step.doc_string = Some(r#"[{"name": "Alice"}]"#.to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&[pattern], &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.expected_body,
+            Some(serde_json::json!([{"name": "Alice"}]))
+        );
+        assert_eq!(ctx.expected_body_pointer.as_deref(), Some("/users"));
+    }
+
+    #[tokio::test]
+    async fn assert_body_matches_at_overwrites_builtin_body_match() {
+        // Pattern order: built-in `AssertBodyMatches` fires first
+        // (no pointer), then user `AssertBodyMatchesAt` reassigns
+        // with a pointer. The scoped form should win, otherwise
+        // users couldn't escape the whole-body partial-match default.
+        let patterns: Vec<StepPattern> = builtin_patterns()
+            .into_iter()
+            .chain(std::iter::once(StepPattern {
+                regex: Regex::new(r"(?i)the view returns").unwrap(),
+                keyword_type: Some(KeywordType::Outcome),
+                actions: vec![Action::AssertBodyMatchesAt {
+                    pointer: "/users".to_string(),
+                }],
+            }))
+            .collect();
+        let mut step = outcome_step("the view returns");
+        step.doc_string = Some(r#"[{"name": "Alice"}]"#.to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert_eq!(
+            ctx.expected_body,
+            Some(serde_json::json!([{"name": "Alice"}]))
+        );
+        assert_eq!(ctx.expected_body_pointer.as_deref(), Some("/users"));
+    }
+
+    #[tokio::test]
+    async fn assert_body_matches_at_empty_object_doc_string_skipped() {
+        // Same vacuous-{} rule as the plain AssertBodyMatches: an
+        // empty doc-string body carries no real assertion regardless
+        // of pointer.
+        let pattern = StepPattern {
+            regex: Regex::new(r"(?i)the view returns").unwrap(),
+            keyword_type: Some(KeywordType::Outcome),
+            actions: vec![Action::AssertBodyMatchesAt {
+                pointer: "/users".to_string(),
+            }],
+        };
+        let mut step = outcome_step("the view returns");
+        step.doc_string = Some("{}".to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&[pattern], &step, &mut ctx, &Value::Null).await;
+        assert!(ctx.expected_body.is_none());
+        assert!(ctx.expected_body_pointer.is_none());
     }
 
     #[tokio::test]
@@ -1871,6 +1967,29 @@ capture_response = { id = "/id", trace = "/meta/trace_id" }
                 );
             }
             other => panic!("expected HttpRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_assert_body_matches_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "matches-at.toml",
+            r#"
+[[pattern]]
+regex = '(?i)the (?P<view>\w+) view returns'
+keyword_type = "Outcome"
+[[pattern.actions]]
+type = "assert_body_matches_at"
+pointer = "/users"
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        assert_eq!(patterns.len(), 1);
+        match &patterns[0].actions[0] {
+            Action::AssertBodyMatchesAt { pointer } => assert_eq!(pointer, "/users"),
+            other => panic!("expected AssertBodyMatchesAt, got {other:?}"),
         }
     }
 
