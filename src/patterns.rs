@@ -73,20 +73,30 @@ pub enum ValueSource {
     /// `None` if the variable is not set.
     Variable(String),
     /// Reshape the step's doc-string before using it as a body.
-    /// Resolution order on the parsed top-level JSON object:
+    /// Resolution stacks three layers on the parsed top-level JSON
+    /// object:
     /// 1. Apply `rename` (old key → new key) on the doc-string.
-    /// 2. Merge `defaults` underneath — doc-string keys win on
+    /// 2. Lay `defaults` underneath — doc-string keys win on
     ///    collision.
+    /// 3. Stamp `overrides` on top — `overrides` keys win even when
+    ///    the doc-string supplies the same key.
     ///
     /// Targets codegen Gherkin whose body shape disagrees with the
     /// real backend: a Gherkin step that emits `{"username": "x"}`
     /// can be mapped to v2's `{"account": "x"}` with rename, and
     /// missing required fields (`organization`, `position`, ...) can
-    /// be filled from `defaults`. Returns `None` if the step has no
-    /// doc-string or the doc-string fails to parse as a JSON object.
+    /// be filled from `defaults`. `overrides` covers the harder case
+    /// where a Gherkin literal value conflicts with a backend
+    /// validator (e.g. Gherkin's `"password": "pass1234"` is 8 chars
+    /// while v2 requires > 8 — override with a longer test password
+    /// pattern-wide).
+    ///
+    /// Returns `None` if the step has no doc-string or the doc-
+    /// string fails to parse as a JSON object.
     DocStringTemplate {
         rename: HashMap<String, String>,
         defaults: Value,
+        overrides: Value,
     },
 }
 
@@ -153,7 +163,11 @@ pub enum Action {
     HttpRequest {
         method: String,
         endpoint_template: String,
-        body_from: Option<ValueSource>,
+        /// Boxed so the enum variant size stays under
+        /// `clippy::large_enum_variant` — `DocStringTemplate`
+        /// carries three heap-pointer fields and bumps the bare
+        /// variant past the threshold.
+        body_from: Option<Box<ValueSource>>,
         headers: HashMap<String, String>,
         capture_response: HashMap<String, String>,
     },
@@ -241,6 +255,11 @@ struct TomlPattern {
     actions: Vec<TomlAction>,
 }
 
+// Transient deserialization shape — converted to `Action` (which
+// boxes the heavy `body_from`) immediately after `toml::from_str`.
+// Boxing here would just add allocations during parsing without any
+// runtime benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TomlAction {
@@ -288,6 +307,8 @@ enum TomlValueSource {
         rename: HashMap<String, String>,
         #[serde(default)]
         defaults: Value,
+        #[serde(default)]
+        overrides: Value,
     },
 }
 
@@ -344,7 +365,7 @@ fn toml_to_action(t: TomlAction) -> Action {
         } => Action::HttpRequest {
             method,
             endpoint_template,
-            body_from: body_from.map(toml_to_value_source),
+            body_from: body_from.map(|b| Box::new(toml_to_value_source(b))),
             headers,
             capture_response,
         },
@@ -357,9 +378,15 @@ fn toml_to_value_source(t: TomlValueSource) -> ValueSource {
         TomlValueSource::DocString => ValueSource::DocString,
         TomlValueSource::Literal { value } => ValueSource::Literal(value),
         TomlValueSource::Variable { name } => ValueSource::Variable(name),
-        TomlValueSource::DocStringTemplate { rename, defaults } => {
-            ValueSource::DocStringTemplate { rename, defaults }
-        }
+        TomlValueSource::DocStringTemplate {
+            rename,
+            defaults,
+            overrides,
+        } => ValueSource::DocStringTemplate {
+            rename,
+            defaults,
+            overrides,
+        },
     }
 }
 
@@ -501,7 +528,7 @@ async fn execute_action(
             fire_http_request(
                 method,
                 endpoint_template,
-                body_from.as_ref(),
+                body_from.as_deref(),
                 headers,
                 capture_response,
                 captures,
@@ -723,25 +750,31 @@ fn resolve_value_source(
         }),
         ValueSource::Literal(v) => Some(v.clone()),
         ValueSource::Variable(name) => variables.get(name).cloned(),
-        ValueSource::DocStringTemplate { rename, defaults } => {
+        ValueSource::DocStringTemplate {
+            rename,
+            defaults,
+            overrides,
+        } => {
             let doc = step.doc_string.as_deref()?;
             let parsed: Value = serde_json::from_str(doc).ok()?;
             let doc_obj = parsed.as_object()?;
-            Some(apply_doc_string_template(doc_obj, rename, defaults))
+            Some(apply_doc_string_template(
+                doc_obj, rename, defaults, overrides,
+            ))
         }
     }
 }
 
-/// Reshape a doc-string JSON object via `rename` (key remapping) and
-/// `defaults` (fallback fields). Renaming happens first; then the
-/// renamed object is merged on top of `defaults` so doc-string keys
-/// win on collision. If `defaults` is not an object it is ignored
-/// (single dropdown of safety for malformed pattern config; an empty
-/// `defaults` is the typical no-op shape).
+/// Reshape a doc-string JSON object via `rename` (key remapping),
+/// `defaults` (fallback fields), and `overrides` (forced fields).
+/// Layers stack: defaults (bottom) ← renamed doc-string ← overrides
+/// (top). Non-object `defaults` / `overrides` are treated as empty
+/// — a safety net for malformed pattern config.
 fn apply_doc_string_template(
     doc_obj: &serde_json::Map<String, Value>,
     rename: &HashMap<String, String>,
     defaults: &Value,
+    overrides: &Value,
 ) -> Value {
     let mut renamed = serde_json::Map::with_capacity(doc_obj.len());
     for (k, v) in doc_obj {
@@ -754,6 +787,11 @@ fn apply_doc_string_template(
     };
     for (k, v) in renamed {
         out.insert(k, v);
+    }
+    if let Some(o) = overrides.as_object() {
+        for (k, v) in o {
+            out.insert(k.clone(), v.clone());
+        }
     }
     Value::Object(out)
 }
@@ -1340,6 +1378,7 @@ mod tests {
             &ValueSource::DocStringTemplate {
                 rename,
                 defaults: Value::Null,
+                overrides: Value::Null,
             },
             &step,
             &caps,
@@ -1365,6 +1404,7 @@ mod tests {
                     "position": "coach",
                     "roles": ["user_full"],
                 }),
+                overrides: Value::Null,
             },
             &step,
             &caps,
@@ -1392,6 +1432,7 @@ mod tests {
             &ValueSource::DocStringTemplate {
                 rename: HashMap::new(),
                 defaults: serde_json::json!({"position": "coach"}),
+                overrides: Value::Null,
             },
             &step,
             &caps,
@@ -1423,6 +1464,7 @@ mod tests {
                     "position": "coach",
                     "roles": ["user_full"],
                 }),
+                overrides: Value::Null,
             },
             &step,
             &caps,
@@ -1451,6 +1493,7 @@ mod tests {
             &ValueSource::DocStringTemplate {
                 rename: HashMap::new(),
                 defaults: serde_json::json!({"a": 1}),
+                overrides: Value::Null,
             },
             &step,
             &caps,
@@ -1469,12 +1512,117 @@ mod tests {
             &ValueSource::DocStringTemplate {
                 rename: HashMap::new(),
                 defaults: Value::Null,
+                overrides: Value::Null,
             },
             &step,
             &caps,
             &empty_vars(),
         );
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn doc_string_template_overrides_win_over_doc_string() {
+        // Phase 3.3: `overrides` is the top merge layer — it wins
+        // even when the doc-string supplies the same key. Mirrors the
+        // v2 case where Gherkin's literal `pass1234` (8 chars) fails
+        // a "> 8 chars" backend validator and must be replaced
+        // pattern-wide.
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"password": "pass1234", "username": "coach"}"#.to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: Value::Null,
+                overrides: serde_json::json!({"password": "Pass12345!"}),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({"password": "Pass12345!", "username": "coach"}))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_overrides_win_over_defaults() {
+        // overrides also beats defaults when both supply the same
+        // key — guards the layering order.
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"name": "Alice"}"#.to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: serde_json::json!({"role": "user"}),
+                overrides: serde_json::json!({"role": "admin"}),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({"name": "Alice", "role": "admin"}))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_overrides_compose_with_rename_and_defaults() {
+        // Full v2 Login shape: rename `username` -> `account`,
+        // defaults supply the (unused here) extra fields, overrides
+        // force a long-enough password.
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"username": "coach_wang", "password": "pass1234"}"#.to_string());
+        let mut rename = HashMap::new();
+        rename.insert("username".to_string(), "account".to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename,
+                defaults: serde_json::json!({"placeholder": true}),
+                overrides: serde_json::json!({"password": "Pass12345!"}),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({
+                "account": "coach_wang",
+                "password": "Pass12345!",
+                "placeholder": true,
+            }))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_non_object_overrides_ignored() {
+        // Malformed `overrides` (non-object) is treated as empty
+        // rather than producing a panic / spec error. Matches the
+        // existing tolerance for non-object `defaults`.
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"a": 1}"#.to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: Value::Null,
+                overrides: serde_json::json!("not an object"),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(resolved, Some(serde_json::json!({"a": 1})));
     }
 
     #[test]
@@ -1487,6 +1635,7 @@ mod tests {
             &ValueSource::DocStringTemplate {
                 rename: HashMap::new(),
                 defaults: Value::Null,
+                overrides: Value::Null,
             },
             &step,
             &caps,
@@ -1676,7 +1825,10 @@ body_from = { kind = "match_group", name = "name" }
             } => {
                 assert_eq!(method, "POST");
                 assert_eq!(endpoint_template, "/users");
-                assert!(matches!(body_from, Some(ValueSource::MatchGroup(s)) if s == "name"));
+                match body_from.as_deref() {
+                    Some(ValueSource::MatchGroup(s)) => assert_eq!(s, "name"),
+                    other => panic!("expected MatchGroup, got {other:?}"),
+                }
             }
             other => panic!("expected HttpRequest, got {other:?}"),
         }
@@ -1740,11 +1892,15 @@ body_from = { kind = "doc_string_template", rename = { username = "account" }, d
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
-        match &patterns[0].actions[0] {
-            Action::HttpRequest {
-                body_from: Some(ValueSource::DocStringTemplate { rename, defaults }),
-                ..
-            } => {
+        let Action::HttpRequest { body_from, .. } = &patterns[0].actions[0] else {
+            panic!("expected HttpRequest, got {:?}", &patterns[0].actions[0]);
+        };
+        match body_from.as_deref() {
+            Some(ValueSource::DocStringTemplate {
+                rename,
+                defaults,
+                overrides,
+            }) => {
                 assert_eq!(rename.get("username").map(String::as_str), Some("account"));
                 assert_eq!(
                     defaults,
@@ -1754,8 +1910,44 @@ body_from = { kind = "doc_string_template", rename = { username = "account" }, d
                         "roles": ["user_full"],
                     })
                 );
+                assert!(overrides.is_null());
             }
-            other => panic!("expected HttpRequest with doc_string_template, got {other:?}"),
+            other => panic!("expected DocStringTemplate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_doc_string_template_with_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "tpl-overrides.toml",
+            r#"
+[[pattern]]
+regex = '(?i)Anonymous sends Login'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/auth/login"
+body_from = { kind = "doc_string_template", rename = { username = "account" }, overrides = { password = "Pass12345!" } }
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        let Action::HttpRequest { body_from, .. } = &patterns[0].actions[0] else {
+            panic!("expected HttpRequest, got {:?}", &patterns[0].actions[0]);
+        };
+        match body_from.as_deref() {
+            Some(ValueSource::DocStringTemplate {
+                rename,
+                defaults,
+                overrides,
+            }) => {
+                assert_eq!(rename.get("username").map(String::as_str), Some("account"));
+                assert!(defaults.is_null());
+                assert_eq!(overrides, &serde_json::json!({"password": "Pass12345!"}));
+            }
+            other => panic!("expected DocStringTemplate, got {other:?}"),
         }
     }
 
@@ -1777,14 +1969,19 @@ body_from = { kind = "doc_string_template", rename = { username = "account" } }
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
-        match &patterns[0].actions[0] {
-            Action::HttpRequest {
-                body_from: Some(ValueSource::DocStringTemplate { rename, defaults }),
-                ..
-            } => {
+        let Action::HttpRequest { body_from, .. } = &patterns[0].actions[0] else {
+            panic!("expected HttpRequest, got {:?}", &patterns[0].actions[0]);
+        };
+        match body_from.as_deref() {
+            Some(ValueSource::DocStringTemplate {
+                rename,
+                defaults,
+                overrides,
+            }) => {
                 assert_eq!(rename.len(), 1);
                 assert_eq!(rename.get("username").map(String::as_str), Some("account"));
                 assert!(defaults.is_null());
+                assert!(overrides.is_null());
             }
             other => panic!("expected DocStringTemplate, got {other:?}"),
         }
@@ -1807,14 +2004,14 @@ body_from = { kind = "literal", value = { hello = "world" } }
 "#,
         );
         let patterns = load_from_file(&path).unwrap();
-        match &patterns[0].actions[0] {
-            Action::HttpRequest {
-                body_from: Some(ValueSource::Literal(v)),
-                ..
-            } => {
+        let Action::HttpRequest { body_from, .. } = &patterns[0].actions[0] else {
+            panic!("expected HttpRequest, got {:?}", &patterns[0].actions[0]);
+        };
+        match body_from.as_deref() {
+            Some(ValueSource::Literal(v)) => {
                 assert_eq!(v, &serde_json::json!({"hello": "world"}));
             }
-            other => panic!("expected HttpRequest with literal body_from, got {other:?}"),
+            other => panic!("expected literal body_from, got {other:?}"),
         }
     }
 

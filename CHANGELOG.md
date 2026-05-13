@@ -46,6 +46,19 @@ any minor or pre-release bump.
     `body_from = { kind = "doc_string_template", rename = { … },
     defaults = { … } }`. Both fields are optional (default to
     empty map / JSON null respectively).
+- **Phase 3.3** — `DocStringTemplate` grows an `overrides` field
+  that wins OVER the doc-string. Resolution now stacks three
+  layers: `defaults` (bottom) ← renamed doc-string ← `overrides`
+  (top). Targets cases where a Gherkin literal collides with a
+  backend validator pattern-wide (the dogfood case: Gherkin's
+  `"password": "pass1234"` is 8 chars, v2's `Password` validator
+  requires `> 8` → `overrides = { password = "Pass12345!" }`
+  rewrites every Login / CreateAccount body without touching
+  the Gherkin).
+  - Optional field on the existing `doc_string_template` body
+    source; defaults to JSON null (no overrides).
+  - Non-object `overrides` is silently treated as empty,
+    matching the existing tolerance for non-object `defaults`.
 
 ### Changed
 
