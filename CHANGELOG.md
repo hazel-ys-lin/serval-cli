@@ -9,6 +9,21 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-13
+
+Packaging-only follow-up to v0.5.0. The default cargo-dist
+archive format `.tar.xz` requires `xz-utils`, which is missing
+on minimal Ubuntu / Alpine container images and trips clean-
+container installs (`tar (child): xz: Cannot exec`). Switch to
+`.tar.gz` for unix targets — universally available at the cost
+of ~20% larger archive size. No source code changes; the
+runtime binary is identical to v0.5.0.
+
+### Changed
+
+- `dist-workspace.toml`: `unix-archive = ".tar.gz"` (was the
+  cargo-dist default `.tar.xz`).
+
 ## [0.5.0] - 2026-05-13
 
 Phase 3 complete: the step-pattern engine grows the seven knobs

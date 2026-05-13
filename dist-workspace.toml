@@ -20,6 +20,11 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux
 # `~/.cargo/bin` — most consumers run a non-Rust backend and don't
 # have cargo installed, so the cargo path is surprising.
 install-path = "~/.local/bin"
+# Archive format for unix targets. Default `.tar.xz` requires
+# `xz-utils` which is missing on minimal Ubuntu / Alpine images and
+# trips fresh-container installs. `.tar.gz` is universally available
+# at the cost of ~20% larger archive size.
+unix-archive = ".tar.gz"
 # Where to host releases
 hosting = "github"
 # Whether to install an updater program

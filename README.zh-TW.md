@@ -4,7 +4,7 @@
 
 > 🇬🇧 English: [README.md](README.md)
 
-**狀態**：v0.5.0 — Phase 0（lite-native CLI 起步）、Phase 1（CLI 主介面）、Phase 2（step-pattern 引擎：內建 + 使用者 TOML patterns、多步驟 `Action::HttpRequest`、doc-string 深度比對、failure-mode `operation fails with` 斷言、嚴格模式擋空斷言）、Phase 3（codegen Gherkin → REST 翻譯：`DocStringTemplate { rename, defaults, overrides }` 改 body shape、`AssertBodyMatchesAt` 子文件比對、`accepted_status` seed POST idempotency、stream-id 符號表 via 模板化 `capture_response` + 多-pass 模板取代、`doc_captures` 把 doc-string 欄位拉出來串 UUID 鏈）全部完成。Prebuilt binary 透過 [`cargo-dist`](https://github.com/axodotdev/cargo-dist) 出。Source-agnostic 攝取（OpenAPI 3.x / AsyncAPI）在 roadmap；今天 CLI 只吃 Gherkin。
+**狀態**：v0.5.1 — Phase 0（lite-native CLI 起步）、Phase 1（CLI 主介面）、Phase 2（step-pattern 引擎：內建 + 使用者 TOML patterns、多步驟 `Action::HttpRequest`、doc-string 深度比對、failure-mode `operation fails with` 斷言、嚴格模式擋空斷言）、Phase 3（codegen Gherkin → REST 翻譯：`DocStringTemplate { rename, defaults, overrides }` 改 body shape、`AssertBodyMatchesAt` 子文件比對、`accepted_status` seed POST idempotency、stream-id 符號表 via 模板化 `capture_response` + 多-pass 模板取代、`doc_captures` 把 doc-string 欄位拉出來串 UUID 鏈）全部完成。Prebuilt binary 透過 [`cargo-dist`](https://github.com/axodotdev/cargo-dist) 出。Source-agnostic 攝取（OpenAPI 3.x / AsyncAPI）在 roadmap；今天 CLI 只吃 Gherkin。
 
 ## 它是什麼
 
@@ -46,14 +46,14 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc  # 或 ~/.bashrc
 
 ### 手動下載
 
-到 [最新 release](https://github.com/hazel-ys-lin/serval-cli/releases/latest) 抓對應 OS / arch 的 `.tar.xz`，解開把 `serval` binary 放進 `PATH`。
+到 [最新 release](https://github.com/hazel-ys-lin/serval-cli/releases/latest) 抓對應 OS / arch 的 `.tar.gz`，解開把 `serval` binary 放進 `PATH`。
 
 ### 從 source 編
 
 Binary 本身是用 Rust 寫的；如果你想自己編譯，先裝 [Rust](https://rustup.rs)，然後：
 
 ```sh
-cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.0
+cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.1
 ```
 
 ## 三分鐘上手
@@ -80,7 +80,7 @@ serval run specs/health.feature
 
 跑完寫一份 JSON 報告到 `.serval/reports/`；用 `serval history` 列、`serval diff <id1> <id2>` 比對兩次 run 的 PASS↔FAIL flip。
 
-## Subcommand 介面（v0.5.0）
+## Subcommand 介面（v0.5.1）
 
 ```text
 serval run <path> [--env NAME | --base-url URL] [--endpoint P] [--method M]

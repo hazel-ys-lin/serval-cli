@@ -4,7 +4,7 @@
 
 > 🇹🇼 中文文件：[README.zh-TW.md](README.zh-TW.md)
 
-**Status:** v0.5.0 — Phase 0 (lite-native CLI scaffold), Phase 1 (CLI primary interface), Phase 2 (step-pattern engine: built-in + user TOML patterns, multi-step `Action::HttpRequest`, doc-string deep match, failure-mode `operation fails with` step, strict vacuous-PASS detection), and Phase 3 (codegen Gherkin → REST translation: `DocStringTemplate { rename, defaults, overrides }` body reshape, `AssertBodyMatchesAt` scoped deep-match, `accepted_status` seed idempotency, stream-id symbol table via templated `capture_response` + multi-pass template substitution, `doc_captures` for body-field UUID chains) complete. Prebuilt binaries ship via [`cargo-dist`](https://github.com/axodotdev/cargo-dist). Source-agnostic ingestion (OpenAPI 3.x / AsyncAPI) is on the roadmap; today the CLI consumes Gherkin only.
+**Status:** v0.5.1 — Phase 0 (lite-native CLI scaffold), Phase 1 (CLI primary interface), Phase 2 (step-pattern engine: built-in + user TOML patterns, multi-step `Action::HttpRequest`, doc-string deep match, failure-mode `operation fails with` step, strict vacuous-PASS detection), and Phase 3 (codegen Gherkin → REST translation: `DocStringTemplate { rename, defaults, overrides }` body reshape, `AssertBodyMatchesAt` scoped deep-match, `accepted_status` seed idempotency, stream-id symbol table via templated `capture_response` + multi-pass template substitution, `doc_captures` for body-field UUID chains) complete. Prebuilt binaries ship via [`cargo-dist`](https://github.com/axodotdev/cargo-dist). Source-agnostic ingestion (OpenAPI 3.x / AsyncAPI) is on the roadmap; today the CLI consumes Gherkin only.
 
 ## What it is
 
@@ -46,14 +46,14 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc
 
 ### Manual download
 
-Pick the `.tar.xz` matching your OS/arch from the [latest release](https://github.com/hazel-ys-lin/serval-cli/releases/latest), extract the `serval` binary, and place it on your `PATH`.
+Pick the `.tar.gz` matching your OS/arch from the [latest release](https://github.com/hazel-ys-lin/serval-cli/releases/latest), extract the `serval` binary, and place it on your `PATH`.
 
 ### From source
 
 The binary itself is written in Rust; if you'd rather build from source, install [Rust](https://rustup.rs) first then:
 
 ```sh
-cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.0
+cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.1
 ```
 
 ## Quick start
@@ -80,7 +80,7 @@ serval run specs/health.feature
 
 The run writes a JSON report under `.serval/reports/`; list and compare past runs with `serval history` and `serval diff`.
 
-## Subcommand surface (v0.5.0)
+## Subcommand surface (v0.5.1)
 
 ```text
 serval run <path> [--env NAME | --base-url URL] [--endpoint P] [--method M]
