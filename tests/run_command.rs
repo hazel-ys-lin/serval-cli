@@ -1083,6 +1083,109 @@ fn run_stream_id_symbol_table_chains_seed_capture_into_delete() {
 }
 
 #[test]
+fn run_doc_captures_resolves_stream_id_in_body_overrides() {
+    // Phase 3.7 end-to-end: a CreatePlayer-like pattern needs to
+    // translate Gherkin's `"teamId": "team-001"` (a stream id) into
+    // the backend's UUID before the body lands on the API. Chain:
+    //   1. A prior seed pattern captures `team_for_team-001` =
+    //      <uuid> via response.
+    //   2. The current step's pattern extracts the doc-string's
+    //      `/teamId` into `team_stream` via doc_captures.
+    //   3. The body's overrides set `team_id` = lookup chain
+    //      `{{$team_for_{{$team_stream}}}}`, which multipass
+    //      variable substitution resolves to the captured UUID.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/teams/create");
+        then.status(201)
+            .json_body(json!({"id": "019e1f49-team", "teamName": "T"}));
+    });
+    server.mock(|when, then| {
+        when.method(Method::POST)
+            .path("/teams/members/create")
+            .json_body_partial(r#"{"team_id": "019e1f49-team"}"#);
+        then.status(201)
+            .json_body(json!({"id": "019e1f49-mem", "name": "Alice"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        concat!(
+            "[[pattern]]\n",
+            "regex = '(?i)the TeamCreated event has occurred on stream \"(?P<stream>[^\"]+)\"'\n",
+            "keyword_type = \"Context\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"POST\"\n",
+            "endpoint_template = \"/teams/create\"\n",
+            "capture_response = { \"team_for_{{stream}}\" = \"/id\" }\n",
+            "accepted_status = [201, 409]\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)the PlayerCreated event has occurred on stream \"(?P<stream>[^\"]+)\"'\n",
+            "keyword_type = \"Context\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"POST\"\n",
+            "endpoint_template = \"/teams/members/create\"\n",
+            "doc_captures = { team_stream = \"/teamId\" }\n",
+            "body_from = { kind = \"doc_string_template\", rename = { playerName = \"name\" }, defaults = { jersey_number = \"1\", position = \"PITCHER\" }, overrides = { team_id = \"{{$team_for_{{$team_stream}}}}\" } }\n",
+            "accepted_status = [201, 409]\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)status should pass'\n",
+            "keyword_type = \"Outcome\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"assert_expected_status_in_range\"\n",
+            "min = 200\n",
+            "max = 299\n",
+        ),
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("doc-captures.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: doc_captures chain\n",
+            "  Scenario: PlayerCreated rewrites teamId to captured team UUID\n",
+            "    Given the TeamCreated event has occurred on stream \"team-001\":\n",
+            "      \"\"\"\n",
+            "      {\"teamName\": \"T\"}\n",
+            "      \"\"\"\n",
+            "    And the PlayerCreated event has occurred on stream \"player-001\":\n",
+            "      \"\"\"\n",
+            "      {\"playerName\": \"Alice\", \"teamId\": \"team-001\", \"height\": 165}\n",
+            "      \"\"\"\n",
+            "    Then status should pass\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--endpoint",
+            "/placeholder",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+#[test]
 fn run_captures_response_field_into_scenario_variable() {
     // Phase 3.0: a login pattern captures `/access_token` from the
     // response body; a subsequent pattern reads it via `{{$token}}`

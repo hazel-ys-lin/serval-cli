@@ -107,6 +107,29 @@ any minor or pre-release bump.
   - Allowed characters inside template names expanded from
     `\w+` to `[\w.\-:]+` so stream ids like `acc-001` round-trip
     through the variable key.
+- **Phase 3.7** — body-field templating from doc-string contents.
+  Three engine knobs land together to close the case where a
+  Gherkin step's doc-string carries a stream-id buried in a body
+  field (Gherkin's `"teamId": "team-001"`) that the backend
+  expects as a captured UUID:
+  - `Action::HttpRequest` grows `doc_captures: HashMap<String,
+    String>` (TOML: `doc_captures = { team_stream = "/teamId" }`).
+    Before the request fires, the doc-string is parsed as JSON
+    and each pointer is evaluated; the result lands in scenario
+    variables, available to template substitutions for endpoint
+    / headers / body.
+  - String values inside `DocStringTemplate.defaults` /
+    `overrides` are run through `substitute_template` before the
+    merge — so an override like
+    `team_id = "{{$team_for_{{$team_stream}}}}"` resolves
+    against captured variables to land a UUID in the body.
+    `substitute_value_strings` walks nested objects + arrays,
+    leaving non-string leaves untouched.
+  - `substitute_template`'s variable-pass loops until stable
+    (bounded at 5 iterations), so a variable's name can contain
+    another variable reference. Resolves
+    `{{$team_for_{{$team_stream}}}}` to the UUID in two
+    iterations.
 
 ### Changed
 

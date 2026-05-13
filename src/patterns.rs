@@ -193,6 +193,16 @@ pub enum Action {
         /// both (`accepted_status = [201, 409]`) treats either as
         /// "seed in place" and lets the scenario continue.
         accepted_status: Vec<i16>,
+        /// Phase 3.7: extract values from the step's doc-string
+        /// JSON into scenario variables BEFORE the request fires.
+        /// Each entry is `var_name → JSON pointer` (RFC 6901). The
+        /// captured values feed `endpoint_template` / `headers` /
+        /// `body_from = doc_string_template` value substitutions
+        /// so a pattern can translate a stream-id buried in the
+        /// doc-string (Gherkin's `"teamId": "team-001"`) into a
+        /// previously-captured backend UUID via a chain like
+        /// `overrides = { team_id = "{{$team_for_{{$team_stream}}}}" }`.
+        doc_captures: HashMap<String, String>,
     },
 }
 
@@ -314,6 +324,8 @@ enum TomlAction {
         capture_response: HashMap<String, String>,
         #[serde(default)]
         accepted_status: Vec<i16>,
+        #[serde(default)]
+        doc_captures: HashMap<String, String>,
     },
 }
 
@@ -392,6 +404,7 @@ fn toml_to_action(t: TomlAction) -> Action {
             headers,
             capture_response,
             accepted_status,
+            doc_captures,
         } => Action::HttpRequest {
             method,
             endpoint_template,
@@ -399,6 +412,7 @@ fn toml_to_action(t: TomlAction) -> Action {
             headers,
             capture_response,
             accepted_status,
+            doc_captures,
         },
     }
 }
@@ -556,6 +570,7 @@ async fn execute_action(
             headers,
             capture_response,
             accepted_status,
+            doc_captures,
         } => {
             fire_http_request(
                 method,
@@ -564,6 +579,7 @@ async fn execute_action(
                 headers,
                 capture_response,
                 accepted_status,
+                doc_captures,
                 captures,
                 step,
                 context,
@@ -672,11 +688,29 @@ async fn fire_http_request(
     pattern_headers: &HashMap<String, String>,
     capture_response: &HashMap<String, String>,
     accepted_status: &[i16],
+    doc_captures: &HashMap<String, String>,
     captures: &Captures<'_>,
     step: &ParsedStep,
     context: &mut ScenarioContext,
     apply_ctx: &ApplyContext<'_>,
 ) -> Result<()> {
+    // Phase 3.7: pull doc-string fields into scenario variables
+    // BEFORE template substitution runs on endpoint / headers /
+    // body. Lets a pattern translate a stream id embedded in the
+    // doc-string (e.g. `"teamId": "team-001"`) into a previously-
+    // captured backend UUID by chaining `doc_captures` →
+    // `variables` → `overrides`.
+    if !doc_captures.is_empty()
+        && let Some(doc) = &step.doc_string
+        && let Ok(parsed_doc) = serde_json::from_str::<Value>(doc)
+    {
+        for (var_name, pointer) in doc_captures {
+            if let Some(value) = parsed_doc.pointer(pointer) {
+                context.variables.insert(var_name.clone(), value.clone());
+            }
+        }
+    }
+
     let endpoint = substitute_template(endpoint_template, captures, &context.variables);
     let url = format!("{}{}", apply_ctx.base_url.trim_end_matches('/'), endpoint);
     let parsed_method = parse_method(method)?;
@@ -805,16 +839,29 @@ fn substitute_template(
             .map(|m| m.as_str().to_string())
             .unwrap_or_default()
     });
-    VARIABLES_PASS
-        .replace_all(&after_captures, |caps: &Captures| {
-            let name = &caps[1];
-            match variables.get(name) {
-                Some(Value::String(s)) => s.clone(),
-                Some(other) => other.to_string(),
-                None => String::new(),
-            }
-        })
-        .into_owned()
+    // Phase 3.7: loop pass 2 until stable so a variable name can
+    // itself contain a variable reference
+    // (`{{$team_for_{{$team_stream}}}}` resolves inner first, then
+    // outer). Bounded at 5 iterations to guard against pathological
+    // self-reference cycles.
+    let mut current = after_captures.into_owned();
+    for _ in 0..5 {
+        let next = VARIABLES_PASS
+            .replace_all(&current, |caps: &Captures| {
+                let name = &caps[1];
+                match variables.get(name) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                }
+            })
+            .into_owned();
+        if next == current {
+            return next;
+        }
+        current = next;
+    }
+    current
 }
 
 fn resolve_value_source(
@@ -841,7 +888,7 @@ fn resolve_value_source(
             let parsed: Value = serde_json::from_str(doc).ok()?;
             let doc_obj = parsed.as_object()?;
             Some(apply_doc_string_template(
-                doc_obj, rename, defaults, overrides,
+                doc_obj, rename, defaults, overrides, captures, variables,
             ))
         }
     }
@@ -852,30 +899,74 @@ fn resolve_value_source(
 /// Layers stack: defaults (bottom) ← renamed doc-string ← overrides
 /// (top). Non-object `defaults` / `overrides` are treated as empty
 /// — a safety net for malformed pattern config.
+///
+/// Phase 3.7: string values inside `defaults` and `overrides` are
+/// template-substituted via [`substitute_template`] before merging,
+/// so a pattern can pin a body field to a captured UUID
+/// (`overrides = { team_id = "{{$team_for_{{$team_stream}}}}" }`).
+/// The doc-string contents themselves are NOT substituted — they
+/// land verbatim into the merge.
+#[allow(clippy::too_many_arguments)]
 fn apply_doc_string_template(
     doc_obj: &serde_json::Map<String, Value>,
     rename: &HashMap<String, String>,
     defaults: &Value,
     overrides: &Value,
+    captures: &Captures<'_>,
+    variables: &HashMap<String, Value>,
 ) -> Value {
+    let defaults_subst = substitute_value_strings(defaults, captures, variables);
+    let overrides_subst = substitute_value_strings(overrides, captures, variables);
+
     let mut renamed = serde_json::Map::with_capacity(doc_obj.len());
     for (k, v) in doc_obj {
         let mapped = rename.get(k).cloned().unwrap_or_else(|| k.clone());
         renamed.insert(mapped, v.clone());
     }
-    let mut out = match defaults.as_object() {
+    let mut out = match defaults_subst.as_object() {
         Some(d) => d.clone(),
         None => serde_json::Map::new(),
     };
     for (k, v) in renamed {
         out.insert(k, v);
     }
-    if let Some(o) = overrides.as_object() {
+    if let Some(o) = overrides_subst.as_object() {
         for (k, v) in o {
             out.insert(k.clone(), v.clone());
         }
     }
     Value::Object(out)
+}
+
+/// Walk a `Value` and substitute templates inside every `Value::String`
+/// leaf. Non-string leaves pass through unchanged. Used by
+/// [`apply_doc_string_template`] to resolve `{{$var}}` references
+/// inside `defaults` / `overrides` before they're merged with the
+/// doc-string.
+fn substitute_value_strings(
+    v: &Value,
+    captures: &Captures<'_>,
+    variables: &HashMap<String, Value>,
+) -> Value {
+    match v {
+        Value::String(s) => Value::String(substitute_template(s, captures, variables)),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, val) in map {
+                out.insert(
+                    k.clone(),
+                    substitute_value_strings(val, captures, variables),
+                );
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|item| substitute_value_strings(item, captures, variables))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 // ---------- private helpers (formerly methods on TestRunner) ----------
@@ -1804,6 +1895,118 @@ mod tests {
                 "password": "Pass12345!",
                 "placeholder": true,
             }))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_overrides_value_substitutes_variable() {
+        // Phase 3.7: string values inside `overrides` resolve their
+        // `{{$var}}` placeholders against scenario variables before
+        // the merge — lets a pattern set a body field to a
+        // previously-captured UUID.
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"name": "Alice"}"#.to_string());
+        let mut vars = HashMap::new();
+        vars.insert(
+            "team_for_acme".to_string(),
+            Value::String("019e1f49-team".to_string()),
+        );
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: Value::Null,
+                overrides: serde_json::json!({
+                    "team_id": "{{$team_for_acme}}",
+                }),
+            },
+            &step,
+            &caps,
+            &vars,
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({
+                "name": "Alice",
+                "team_id": "019e1f49-team",
+            }))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_defaults_value_substitutes_capture() {
+        // Same idea, but in `defaults` and via a regex capture
+        // (no `$`) instead of a variable.
+        let re = Regex::new(r"^stream=(?P<stream>[\w\-]+)$").unwrap();
+        let caps = re.captures("stream=team-001").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"name": "Alice"}"#.to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: serde_json::json!({"stream_label": "src-{{stream}}"}),
+                overrides: Value::Null,
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({
+                "name": "Alice",
+                "stream_label": "src-team-001",
+            }))
+        );
+    }
+
+    #[test]
+    fn substitute_value_strings_walks_nested_objects_and_arrays() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert("uuid".to_string(), Value::String("019e".to_string()));
+        let value = serde_json::json!({
+            "nested": {"id": "{{$uuid}}", "kind": "raw"},
+            "list": ["{{$uuid}}", 42, "literal"],
+            "number": 7,
+            "bool": true,
+            "null_field": null,
+        });
+        let out = substitute_value_strings(&value, &caps, &vars);
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "nested": {"id": "019e", "kind": "raw"},
+                "list": ["019e", 42, "literal"],
+                "number": 7,
+                "bool": true,
+                "null_field": null,
+            })
+        );
+    }
+
+    #[test]
+    fn template_three_layer_nesting_resolves_via_multipass() {
+        // Phase 3.7 multi-pass: `{{$team_for_{{$team_stream}}}}`
+        // — `team_stream` variable holds "team-001"; after pass 1
+        // (no-op, no regex captures), pass 2 iter 1 resolves the
+        // inner reference; pass 2 iter 2 resolves the outer.
+        let re = Regex::new(r"^x$").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert(
+            "team_stream".to_string(),
+            Value::String("team-001".to_string()),
+        );
+        vars.insert(
+            "team_for_team-001".to_string(),
+            Value::String("019e1f49-team-uuid".to_string()),
+        );
+        assert_eq!(
+            substitute_template("{{$team_for_{{$team_stream}}}}", &caps, &vars),
+            "019e1f49-team-uuid"
         );
     }
 
