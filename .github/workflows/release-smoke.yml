@@ -1,0 +1,70 @@
+name: Post-release smoke test
+
+# Runs after cargo-dist publishes a GitHub Release. Verifies the
+# installer + binary actually work on a fresh Linux / macOS image —
+# catches packaging regressions (wrong install-path, missing
+# extractor on minimal images, version-string drift, etc.) that
+# unit tests can't see.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Install + run on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Install serval from latest release
+        run: |
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/latest/download/serval-cli-installer.sh" | sh
+
+      - name: Add ~/.local/bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify binary version matches tag
+        run: |
+          set -eu
+          TAG="${{ github.event.release.tag_name }}"
+          EXPECTED="${TAG#v}"
+          ACTUAL=$(serval --version | awk '{print $2}')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Version mismatch — release tag is $TAG (expected $EXPECTED) but \`serval --version\` reports $ACTUAL"
+            exit 1
+          fi
+          echo "OK: serval --version reports $ACTUAL, matches release tag"
+
+      - name: Boot a local HTTP server
+        run: |
+          python3 -m http.server 8080 >/tmp/http.log 2>&1 &
+          for i in 1 2 3 4 5; do
+            if curl -fsS http://127.0.0.1:8080/ -o /dev/null; then
+              echo "Local HTTP server up"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run a minimal .feature against the local server
+        run: |
+          mkdir -p /tmp/specs
+          cat > /tmp/specs/smoke.feature <<'EOF'
+          ---
+          api:
+            path: /
+            method: GET
+          ---
+          Feature: smoke
+            Scenario: local HTTP server returns 200
+              Then status should be 200
+          EOF
+          serval env set local --base-url http://127.0.0.1:8080 --make-default
+          serval run /tmp/specs/smoke.feature --no-report
