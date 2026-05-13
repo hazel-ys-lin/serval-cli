@@ -2,7 +2,7 @@
 
 > Spec-anchored API verification CLI. Run Gherkin `.feature` files against any HTTP target, get pass/fail.
 
-**Status:** v0.4.0 — Phase 0 (lite-native CLI scaffold), Phase 1 (CLI primary interface), and Phase 2 (step-pattern engine: built-in + user TOML patterns, multi-step `Action::HttpRequest`, doc-string deep match, failure-mode `operation fails with` step, strict vacuous-PASS detection) complete. Prebuilt binaries ship via [`cargo-dist`](https://github.com/axodotdev/cargo-dist). Source-agnostic ingestion (OpenAPI 3.x / AsyncAPI) is on the roadmap; today the CLI consumes Gherkin only.
+**Status:** v0.5.0 — Phase 0 (lite-native CLI scaffold), Phase 1 (CLI primary interface), Phase 2 (step-pattern engine: built-in + user TOML patterns, multi-step `Action::HttpRequest`, doc-string deep match, failure-mode `operation fails with` step, strict vacuous-PASS detection), and Phase 3 (codegen Gherkin → REST translation: `DocStringTemplate { rename, defaults, overrides }` body reshape, `AssertBodyMatchesAt` scoped deep-match, `accepted_status` seed idempotency, stream-id symbol table via templated `capture_response` + multi-pass template substitution, `doc_captures` for body-field UUID chains) complete. Prebuilt binaries ship via [`cargo-dist`](https://github.com/axodotdev/cargo-dist). Source-agnostic ingestion (OpenAPI 3.x / AsyncAPI) is on the roadmap; today the CLI consumes Gherkin only.
 
 ## What it is
 
@@ -40,7 +40,7 @@ Drops the `serval` binary into `$CARGO_HOME/bin` (default `~/.cargo/bin`). Make 
 ### From source
 
 ```sh
-cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.4.0
+cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.0
 ```
 
 ### Manual download
@@ -71,7 +71,7 @@ serval run specs/health.feature
 
 The run writes a JSON report under `.serval/reports/`; list and compare past runs with `serval history` and `serval diff`.
 
-## Subcommand surface (v0.4.0)
+## Subcommand surface (v0.5.0)
 
 ```text
 serval run <path> [--env NAME | --base-url URL] [--endpoint P] [--method M]

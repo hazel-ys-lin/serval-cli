@@ -9,6 +9,30 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-13
+
+Phase 3 complete: the step-pattern engine grows the seven knobs
+needed to translate codegen-style event-sourcing Gherkin into a
+real REST backend's wire format without rewriting either side.
+The release groups Phase 3.0 (scenario variables +
+`capture_response` + per-pattern headers + `--header` CLI flag),
+3.1 (`DocStringTemplate { rename, defaults }` body reshape),
+3.2 (drop vacuous `{}` doc-string assertion — strict mode now
+catches what was silently false-PASSing), 3.3
+(`DocStringTemplate.overrides` — forced values win over the doc-
+string), 3.4 (`AssertBodyMatchesAt { pointer }` — scoped deep-
+match against a JSON sub-document), 3.5
+(`HttpRequest.accepted_status` — seed POST idempotency knob),
+3.6 (stream-id symbol table — templated `capture_response` keys
+plus two-pass `substitute_template`), and 3.7 (`doc_captures` +
+override-value templating + multi-pass variable substitution).
+
+A real-world dogfood against the jsjh-backend-v2 REST API
+exercised every engine path end-to-end. See CHANGELOG.md /
+`examples/event-sourcing.toml` for the full surface; the
+`patterns.toml` schema is backward compatible — every new field
+is optional and absent values restore Phase 2.x behaviour.
+
 ### Added
 
 - **Phase 3.0** — scenario variables and per-pattern headers,
