@@ -839,6 +839,157 @@ fn run_assert_body_matches_at_fails_when_pointer_missing() {
 }
 
 #[test]
+fn run_accepted_status_treats_listed_codes_as_success() {
+    // Phase 3.5: a seed POST pattern with accepted_status = [201,
+    // 409] tolerates a "user already exists" response across
+    // re-runs. Scenario continues normally so the downstream When
+    // / Then assertion can land.
+    let server = MockServer::start();
+    // Seed POST returns 409 — treated as acceptable by the
+    // pattern's accepted_status list.
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/users/create");
+        then.status(409)
+            .json_body(json!({"detail": "already exists"}));
+    });
+    // Subsequent login the scenario also fires — its 200 response
+    // is what the Then assertion validates against.
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/auth/login");
+        then.status(200).json_body(json!({"token": "tk"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        concat!(
+            "[[pattern]]\n",
+            "regex = '(?i)the AccountCreated event has occurred'\n",
+            "keyword_type = \"Context\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"POST\"\n",
+            "endpoint_template = \"/users/create\"\n",
+            "accepted_status = [201, 409]\n",
+            "\n",
+            "[[pattern]]\n",
+            "regex = '(?i)Anonymous sends Login'\n",
+            "keyword_type = \"Action\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"POST\"\n",
+            "endpoint_template = \"/auth/login\"\n",
+        ),
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("seed-409.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: Seed idempotency\n",
+            "  Scenario: seed POST returns 409 but scenario continues\n",
+            "    Given the AccountCreated event has occurred on stream \"acc-001\":\n",
+            "      \"\"\"\n",
+            "      {\"name\": \"Alice\"}\n",
+            "      \"\"\"\n",
+            "    When Anonymous sends Login on stream \"acc-001\":\n",
+            "      \"\"\"\n",
+            "      {\"username\": \"alice\"}\n",
+            "      \"\"\"\n",
+            "    Then status should be 200\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--endpoint",
+            "/placeholder",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"))
+        .stdout(predicate::str::contains("1 passed, 0 failed"));
+}
+
+#[test]
+fn run_accepted_status_unlisted_code_fails_the_scenario() {
+    // Negative case: pattern declares accepted_status = [201] but
+    // the backend returns 500. Step is aborted with a clear error
+    // (caught by the runner as a step_failure → scenario FAIL).
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/users/create");
+        then.status(500).json_body(json!({"detail": "boom"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let patterns_path = tmp.path().join("patterns.toml");
+    std::fs::write(
+        &patterns_path,
+        concat!(
+            "[[pattern]]\n",
+            "regex = '(?i)the AccountCreated event has occurred'\n",
+            "keyword_type = \"Context\"\n",
+            "[[pattern.actions]]\n",
+            "type = \"http_request\"\n",
+            "method = \"POST\"\n",
+            "endpoint_template = \"/users/create\"\n",
+            "accepted_status = [201]\n",
+        ),
+    )
+    .unwrap();
+
+    let feature_path = tmp.path().join("seed-500.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: Seed hard failure\n",
+            "  Scenario: seed POST returns 500\n",
+            "    Given the AccountCreated event has occurred on stream \"acc-001\":\n",
+            "      \"\"\"\n",
+            "      {\"name\": \"Alice\"}\n",
+            "      \"\"\"\n",
+            "    Then status should be 200\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--patterns-file",
+            patterns_path.to_str().unwrap(),
+            "--endpoint",
+            "/placeholder",
+            "--method",
+            "GET",
+            "--no-report",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains("returned status 500"))
+        .stdout(predicate::str::contains("accepted_status"));
+}
+
+#[test]
 fn run_captures_response_field_into_scenario_variable() {
     // Phase 3.0: a login pattern captures `/access_token` from the
     // response body; a subsequent pattern reads it via `{{$token}}`

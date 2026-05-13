@@ -74,6 +74,22 @@ any minor or pre-release bump.
   - Same vacuous-`{}` skip as `AssertBodyMatches` (Phase 3.2).
   - Validator surfaces a clear `Pointer /xyz resolved to nothing`
     failure when the pointer doesn't exist in the response.
+- **Phase 3.5** — `Action::HttpRequest` grows an optional
+  `accepted_status: Vec<i16>` field. When non-empty, the
+  response status code must appear in the list — otherwise the
+  step aborts with a clear `HTTP <method> <url> returned status
+  <n>, not in accepted_status [...]` error. Empty / absent
+  preserves the existing "accept any status" behaviour.
+  - Use case: cross-scenario seed POST idempotency. A pattern
+    like `Given the AccountCreated event ...` firing `POST
+    /users/create` against a stateful backend gets 201 on a
+    fresh DB and 409 once the user pre-exists. Declaring
+    `accepted_status = [201, 409]` treats either as success
+    and lets the scenario continue without taking a dependency
+    on DB reset between runs.
+  - The unsuccessful response is still recorded on
+    `ScenarioContext.responses` so post-mortem reports show
+    what the backend returned.
 
 ### Changed
 

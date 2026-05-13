@@ -180,6 +180,19 @@ pub enum Action {
         body_from: Option<Box<ValueSource>>,
         headers: HashMap<String, String>,
         capture_response: HashMap<String, String>,
+        /// If non-empty, the response status must appear in this
+        /// list — otherwise `fire_http_request` returns a Spec
+        /// error and the scenario aborts at that step. Empty list
+        /// (default) accepts any status, preserving pre-3.5
+        /// behaviour where seed POSTs silently swallow errors.
+        ///
+        /// Targets cross-scenario seed idempotency: a `Given the
+        /// AccountCreated event ...` pattern firing `POST
+        /// /users/create` against a stateful backend gets 201 on
+        /// fresh DB and 409 when the user pre-exists. Listing
+        /// both (`accepted_status = [201, 409]`) treats either as
+        /// "seed in place" and lets the scenario continue.
+        accepted_status: Vec<i16>,
     },
 }
 
@@ -299,6 +312,8 @@ enum TomlAction {
         headers: HashMap<String, String>,
         #[serde(default)]
         capture_response: HashMap<String, String>,
+        #[serde(default)]
+        accepted_status: Vec<i16>,
     },
 }
 
@@ -376,12 +391,14 @@ fn toml_to_action(t: TomlAction) -> Action {
             body_from,
             headers,
             capture_response,
+            accepted_status,
         } => Action::HttpRequest {
             method,
             endpoint_template,
             body_from: body_from.map(|b| Box::new(toml_to_value_source(b))),
             headers,
             capture_response,
+            accepted_status,
         },
     }
 }
@@ -538,6 +555,7 @@ async fn execute_action(
             body_from,
             headers,
             capture_response,
+            accepted_status,
         } => {
             fire_http_request(
                 method,
@@ -545,6 +563,7 @@ async fn execute_action(
                 body_from.as_deref(),
                 headers,
                 capture_response,
+                accepted_status,
                 captures,
                 step,
                 context,
@@ -652,6 +671,7 @@ async fn fire_http_request(
     body_from: Option<&ValueSource>,
     pattern_headers: &HashMap<String, String>,
     capture_response: &HashMap<String, String>,
+    accepted_status: &[i16],
     captures: &Captures<'_>,
     step: &ParsedStep,
     context: &mut ScenarioContext,
@@ -694,6 +714,15 @@ async fn fire_http_request(
     let status = response.status().as_u16() as i16;
     let resp_body = response.json::<Value>().await.unwrap_or(Value::Null);
 
+    // Phase 3.5: per-action accepted-status enforcement. If the
+    // pattern declared a non-empty `accepted_status` list and the
+    // response status isn't in it, abort the scenario at this step
+    // with a clear message — guards against silently swallowed
+    // setup errors (e.g. a seed POST returning 500 mid-scenario).
+    // The captured response is still pushed onto `context.responses`
+    // so post-mortem reports can show what came back.
+    let status_accepted = accepted_status.is_empty() || accepted_status.contains(&status);
+
     // Phase 3.0: variable capture. Each `name = "/json/pointer"` entry
     // pulls a value out of the response body via RFC 6901 and stores
     // it on the scenario context under `name` for subsequent steps to
@@ -706,11 +735,17 @@ async fn fire_http_request(
 
     context.responses.push(HttpResponse {
         method: method.to_string(),
-        url,
+        url: url.clone(),
         status,
         body: resp_body,
         duration_ms,
     });
+
+    if !status_accepted {
+        return Err(Error::Spec(format!(
+            "HTTP {method} {url} returned status {status}, not in accepted_status {accepted_status:?}"
+        )));
+    }
     Ok(())
 }
 
@@ -1965,6 +2000,60 @@ capture_response = { id = "/id", trace = "/meta/trace_id" }
                     capture_response.get("trace").map(String::as_str),
                     Some("/meta/trace_id")
                 );
+            }
+            other => panic!("expected HttpRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_http_request_with_accepted_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "accepted.toml",
+            r#"
+[[pattern]]
+regex = '(?i)the (?P<event>\w+) event has occurred'
+keyword_type = "Context"
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/users/create"
+accepted_status = [201, 409]
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        match &patterns[0].actions[0] {
+            Action::HttpRequest {
+                accepted_status, ..
+            } => {
+                assert_eq!(accepted_status, &vec![201_i16, 409]);
+            }
+            other => panic!("expected HttpRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_http_request_without_accepted_status_defaults_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "no-accepted.toml",
+            r#"
+[[pattern]]
+regex = '\bF\b'
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/x"
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        match &patterns[0].actions[0] {
+            Action::HttpRequest {
+                accepted_status, ..
+            } => {
+                assert!(accepted_status.is_empty());
             }
             other => panic!("expected HttpRequest, got {other:?}"),
         }
