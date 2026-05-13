@@ -2,12 +2,15 @@
 
 > Spec-anchored API verification CLI. Run Gherkin `.feature` files against any HTTP target, get pass/fail.
 
+> 🇹🇼 中文文件：[README.zh-TW.md](README.zh-TW.md)
+
 **Status:** v0.5.0 — Phase 0 (lite-native CLI scaffold), Phase 1 (CLI primary interface), Phase 2 (step-pattern engine: built-in + user TOML patterns, multi-step `Action::HttpRequest`, doc-string deep match, failure-mode `operation fails with` step, strict vacuous-PASS detection), and Phase 3 (codegen Gherkin → REST translation: `DocStringTemplate { rename, defaults, overrides }` body reshape, `AssertBodyMatchesAt` scoped deep-match, `accepted_status` seed idempotency, stream-id symbol table via templated `capture_response` + multi-pass template substitution, `doc_captures` for body-field UUID chains) complete. Prebuilt binaries ship via [`cargo-dist`](https://github.com/axodotdev/cargo-dist). Source-agnostic ingestion (OpenAPI 3.x / AsyncAPI) is on the roadmap; today the CLI consumes Gherkin only.
 
 ## What it is
 
 `serval` is a single-binary CLI that reads Gherkin `.feature` files from your repo, executes them against an HTTP target, and reports pass/fail.
 
+- **Backend-agnostic** — serval-cli only speaks HTTP. Your service can be written in any language (Python, Go, Node, Java, Ruby, …); serval-cli doesn't care.
 - Specs live in git (`specs/*.feature`).
 - Config lives in `~/.serval/config.toml`.
 - Results land in `.serval/reports/<ISO-timestamp>.json` in the working directory.
@@ -24,28 +27,34 @@ Three deployment contexts share the same binary:
 - Not a hosted REST service.
 - Not a multi-user platform.
 - Not a code generator.
-- Not a test framework — sits *beside* `cargo test` / `pytest`, doesn't replace them.
+- Not a test framework — sits *beside* your existing test runner (pytest / jest / go test / JUnit / cargo test / …), doesn't replace it.
 - Not an MCP server. Claude Code drives it via `Bash`.
 
 ## Install
 
-### Prebuilt binary (no Rust toolchain needed)
+### Prebuilt binary (recommended)
 
 ```sh
 curl -fsSL https://github.com/hazel-ys-lin/serval-cli/releases/latest/download/serval-cli-installer.sh | sh
 ```
 
-Drops the `serval` binary into `$CARGO_HOME/bin` (default `~/.cargo/bin`). Make sure that directory is on your `PATH`.
-
-### From source
+Drops the `serval` binary into `~/.local/bin` (created if it doesn't exist). Make sure that directory is on your `PATH`:
 
 ```sh
-cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.0
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc  # or ~/.bashrc
 ```
 
 ### Manual download
 
 Pick the `.tar.xz` matching your OS/arch from the [latest release](https://github.com/hazel-ys-lin/serval-cli/releases/latest), extract the `serval` binary, and place it on your `PATH`.
+
+### From source
+
+The binary itself is written in Rust; if you'd rather build from source, install [Rust](https://rustup.rs) first then:
+
+```sh
+cargo install --git https://github.com/hazel-ys-lin/serval-cli --tag v0.5.0
+```
 
 ## Quick start
 
@@ -75,7 +84,10 @@ The run writes a JSON report under `.serval/reports/`; list and compare past run
 
 ```text
 serval run <path> [--env NAME | --base-url URL] [--endpoint P] [--method M]
+                  [--patterns-file PATH] [--header "Key: Value"]…
+                  [--allow-no-assertions]
                   [--report-dir DIR] [--no-report] [--json]
+                  [--config-file PATH]
 serval history       [--limit N] [--report-dir DIR] [--json]
 serval diff <before> <after> [--report-dir DIR] [--json]
 serval api list      [--dir DIR] [--json]
@@ -89,6 +101,15 @@ serval spec validate [<path>]      [--json]
 
 `--json` is global; pass it on any subcommand to switch the output to machine-readable JSON.
 
+## Pattern engine (Phase 2 + Phase 3)
+
+`serval run` translates Gherkin step text into HTTP requests + assertions through a **step-pattern engine**. Two tiers:
+
+- **Built-in patterns** ship inside the binary and cover generic HTTP-shape Gherkin (`Then status should be N`, `Then response contains "x"`, `Given I set header Key Value`, …).
+- **User patterns** layer on top via `~/.serval/patterns.toml` (global) or `<repo>/.serval/patterns.toml` (project), or any path via `--patterns-file`. They map your team's Gherkin convention to your backend's actual HTTP shape — including body reshape (`rename` / `defaults` / `overrides`), JSON-pointer-scoped deep-match (`assert_body_matches_at`), seed-POST idempotency (`accepted_status`), and stream-id ↔ backend-UUID symbol chains (templated `capture_response` + `doc_captures`).
+
+See [`examples/event-sourcing.toml`](examples/event-sourcing.toml) for a working pattern set against the event-sourcing convention (`POST /streams/{id}/events/{Event}`, `POST /streams/{id}/commands/{Cmd}`, `GET /views/{View}`). The full CHANGELOG entry for Phase 3 ([CHANGELOG.md](CHANGELOG.md#050---2026-05-13)) walks through every TOML schema knob.
+
 ## Exit codes (public API)
 
 | Code | Meaning |
@@ -99,12 +120,6 @@ serval spec validate [<path>]      [--json]
 | `3` | Bad input (invalid URL, malformed Gherkin, missing arg). |
 
 CI scripts and agent eval loops should branch on these.
-
-## Origin
-
-`serval-cli` is the CLI-focused successor to [`serval-run-v2`](https://github.com/hazel-ys-lin/serval-run-v2), frozen at `v0.2.0`.
-
-The earlier project explored a Rust REST service backed by SeaORM, MongoDB, and Redis for storing specs, runs, and reports. Through 2026 design discussions it became clear that the right shape for daily use is a CLI tool reading specs straight from git — not a hosted multi-user service. Industry precedent (Postman → Newman, Vue CLI → Vite, `gh` vs `hub`) was the tiebreaker: when the new tool is conceptually a different product, start a new repo rather than patching the old one.
 
 ## License
 

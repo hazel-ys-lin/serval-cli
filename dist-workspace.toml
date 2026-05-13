@@ -15,8 +15,11 @@ installers = ["shell"]
 # work on macOS or Linux. Add `x86_64-pc-windows-msvc` later if a
 # real Windows user shows up.
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
-# Path that installers should place binaries in
-install-path = "CARGO_HOME"
+# Path that installers should place binaries in.
+# Use `~/.local/bin` (XDG convention) rather than the cargo-managed
+# `~/.cargo/bin` — most consumers run a non-Rust backend and don't
+# have cargo installed, so the cargo path is surprising.
+install-path = "~/.local/bin"
 # Where to host releases
 hosting = "github"
 # Whether to install an updater program
