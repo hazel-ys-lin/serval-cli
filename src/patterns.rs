@@ -72,6 +72,22 @@ pub enum ValueSource {
     /// `HttpRequest` action's `capture_response` field. Returns
     /// `None` if the variable is not set.
     Variable(String),
+    /// Reshape the step's doc-string before using it as a body.
+    /// Resolution order on the parsed top-level JSON object:
+    /// 1. Apply `rename` (old key → new key) on the doc-string.
+    /// 2. Merge `defaults` underneath — doc-string keys win on
+    ///    collision.
+    ///
+    /// Targets codegen Gherkin whose body shape disagrees with the
+    /// real backend: a Gherkin step that emits `{"username": "x"}`
+    /// can be mapped to v2's `{"account": "x"}` with rename, and
+    /// missing required fields (`organization`, `position`, ...) can
+    /// be filled from `defaults`. Returns `None` if the step has no
+    /// doc-string or the doc-string fails to parse as a JSON object.
+    DocStringTemplate {
+        rename: HashMap<String, String>,
+        defaults: Value,
+    },
 }
 
 /// What to do when a pattern's regex matches a step's text and the
@@ -257,10 +273,22 @@ enum TomlAction {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TomlValueSource {
-    MatchGroup { name: String },
+    MatchGroup {
+        name: String,
+    },
     DocString,
-    Literal { value: Value },
-    Variable { name: String },
+    Literal {
+        value: Value,
+    },
+    Variable {
+        name: String,
+    },
+    DocStringTemplate {
+        #[serde(default)]
+        rename: HashMap<String, String>,
+        #[serde(default)]
+        defaults: Value,
+    },
 }
 
 fn toml_to_pattern(t: TomlPattern) -> Result<StepPattern> {
@@ -329,6 +357,9 @@ fn toml_to_value_source(t: TomlValueSource) -> ValueSource {
         TomlValueSource::DocString => ValueSource::DocString,
         TomlValueSource::Literal { value } => ValueSource::Literal(value),
         TomlValueSource::Variable { name } => ValueSource::Variable(name),
+        TomlValueSource::DocStringTemplate { rename, defaults } => {
+            ValueSource::DocStringTemplate { rename, defaults }
+        }
     }
 }
 
@@ -690,7 +721,39 @@ fn resolve_value_source(
         }),
         ValueSource::Literal(v) => Some(v.clone()),
         ValueSource::Variable(name) => variables.get(name).cloned(),
+        ValueSource::DocStringTemplate { rename, defaults } => {
+            let doc = step.doc_string.as_deref()?;
+            let parsed: Value = serde_json::from_str(doc).ok()?;
+            let doc_obj = parsed.as_object()?;
+            Some(apply_doc_string_template(doc_obj, rename, defaults))
+        }
     }
+}
+
+/// Reshape a doc-string JSON object via `rename` (key remapping) and
+/// `defaults` (fallback fields). Renaming happens first; then the
+/// renamed object is merged on top of `defaults` so doc-string keys
+/// win on collision. If `defaults` is not an object it is ignored
+/// (single dropdown of safety for malformed pattern config; an empty
+/// `defaults` is the typical no-op shape).
+fn apply_doc_string_template(
+    doc_obj: &serde_json::Map<String, Value>,
+    rename: &HashMap<String, String>,
+    defaults: &Value,
+) -> Value {
+    let mut renamed = serde_json::Map::with_capacity(doc_obj.len());
+    for (k, v) in doc_obj {
+        let mapped = rename.get(k).cloned().unwrap_or_else(|| k.clone());
+        renamed.insert(mapped, v.clone());
+    }
+    let mut out = match defaults.as_object() {
+        Some(d) => d.clone(),
+        None => serde_json::Map::new(),
+    };
+    for (k, v) in renamed {
+        out.insert(k, v);
+    }
+    Value::Object(out)
 }
 
 // ---------- private helpers (formerly methods on TestRunner) ----------
@@ -1190,6 +1253,173 @@ mod tests {
         assert!(resolved.is_none());
     }
 
+    #[test]
+    fn doc_string_template_renames_keys() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"username": "coach_wang", "password": "p"}"#.to_string());
+        let mut rename = HashMap::new();
+        rename.insert("username".to_string(), "account".to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename,
+                defaults: Value::Null,
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({"account": "coach_wang", "password": "p"}))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_fills_missing_fields_from_defaults() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"name": "王教練", "password": "p"}"#.to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: serde_json::json!({
+                    "organization": "v2-dogfood",
+                    "position": "coach",
+                    "roles": ["user_full"],
+                }),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({
+                "name": "王教練",
+                "password": "p",
+                "organization": "v2-dogfood",
+                "position": "coach",
+                "roles": ["user_full"],
+            }))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_doc_string_overrides_defaults() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(r#"{"position": "captain"}"#.to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: serde_json::json!({"position": "coach"}),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(resolved, Some(serde_json::json!({"position": "captain"})));
+    }
+
+    #[test]
+    fn doc_string_template_rename_and_defaults_compose() {
+        // Mirrors the v2 CreateAccount case: rename `username` →
+        // `account`, fill `organization` / `position` / `roles` from
+        // defaults, hash placeholder is implicit (defaults supply
+        // `password` which doc-string overrides if present).
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some(
+            r#"{"name": "王教練", "remark": "U12", "password": "p", "username": "coach_wang"}"#
+                .to_string(),
+        );
+        let mut rename = HashMap::new();
+        rename.insert("username".to_string(), "account".to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename,
+                defaults: serde_json::json!({
+                    "organization": "v2-dogfood",
+                    "position": "coach",
+                    "roles": ["user_full"],
+                }),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert_eq!(
+            resolved,
+            Some(serde_json::json!({
+                "account": "coach_wang",
+                "name": "王教練",
+                "remark": "U12",
+                "password": "p",
+                "organization": "v2-dogfood",
+                "position": "coach",
+                "roles": ["user_full"],
+            }))
+        );
+    }
+
+    #[test]
+    fn doc_string_template_no_doc_string_resolves_to_none() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let step = action_step("");
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: serde_json::json!({"a": 1}),
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn doc_string_template_invalid_json_resolves_to_none() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some("not json at all".to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: Value::Null,
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn doc_string_template_non_object_doc_string_resolves_to_none() {
+        let re = Regex::new(r"x").unwrap();
+        let caps = re.captures("x").unwrap();
+        let mut step = action_step("");
+        step.doc_string = Some("[1, 2, 3]".to_string());
+        let resolved = resolve_value_source(
+            &ValueSource::DocStringTemplate {
+                rename: HashMap::new(),
+                defaults: Value::Null,
+            },
+            &step,
+            &caps,
+            &empty_vars(),
+        );
+        assert!(resolved.is_none());
+    }
+
     // ---- TOML loader tests ----
 
     fn write_patterns(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
@@ -1414,6 +1644,74 @@ capture_response = { id = "/id", trace = "/meta/trace_id" }
                 );
             }
             other => panic!("expected HttpRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_http_request_with_body_from_doc_string_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "tpl.toml",
+            r#"
+[[pattern]]
+regex = '(?i)\w+ sends CreateAccount on stream "(?P<stream>[^"]+)"'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/users/create"
+body_from = { kind = "doc_string_template", rename = { username = "account" }, defaults = { organization = "v2-dogfood", position = "coach", roles = ["user_full"] } }
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        match &patterns[0].actions[0] {
+            Action::HttpRequest {
+                body_from: Some(ValueSource::DocStringTemplate { rename, defaults }),
+                ..
+            } => {
+                assert_eq!(rename.get("username").map(String::as_str), Some("account"));
+                assert_eq!(
+                    defaults,
+                    &serde_json::json!({
+                        "organization": "v2-dogfood",
+                        "position": "coach",
+                        "roles": ["user_full"],
+                    })
+                );
+            }
+            other => panic!("expected HttpRequest with doc_string_template, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_from_file_parses_doc_string_template_with_only_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_patterns(
+            tmp.path(),
+            "rename-only.toml",
+            r#"
+[[pattern]]
+regex = '(?i)Anonymous sends Login'
+keyword_type = "Action"
+[[pattern.actions]]
+type = "http_request"
+method = "POST"
+endpoint_template = "/auth/login"
+body_from = { kind = "doc_string_template", rename = { username = "account" } }
+"#,
+        );
+        let patterns = load_from_file(&path).unwrap();
+        match &patterns[0].actions[0] {
+            Action::HttpRequest {
+                body_from: Some(ValueSource::DocStringTemplate { rename, defaults }),
+                ..
+            } => {
+                assert_eq!(rename.len(), 1);
+                assert_eq!(rename.get("username").map(String::as_str), Some("account"));
+                assert!(defaults.is_null());
+            }
+            other => panic!("expected DocStringTemplate, got {other:?}"),
         }
     }
 

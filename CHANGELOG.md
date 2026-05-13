@@ -31,6 +31,21 @@ any minor or pre-release bump.
     into `TestConfig.custom_headers` and attached to every HTTP
     firing — both pattern-driven `Action::HttpRequest` calls and
     the frontmatter fallback.
+- **Phase 3.1** — `ValueSource::DocStringTemplate { rename,
+  defaults }` reshapes a step's doc-string before using it as a
+  request body. Targets codegen Gherkin whose body shape
+  disagrees with the real backend (Gherkin `{"username": …}`
+  → v2's `{"account": …}` via `rename`; required fields absent
+  from the Gherkin shape filled from `defaults`).
+  - Resolution: read doc-string → parse as JSON object → apply
+    `rename` (old → new key) → merge `defaults` underneath; doc-
+    string keys win on collision. Returns `None` if the step has
+    no doc-string, the doc-string is not valid JSON, or it is
+    not a top-level object.
+  - TOML schema:
+    `body_from = { kind = "doc_string_template", rename = { … },
+    defaults = { … } }`. Both fields are optional (default to
+    empty map / JSON null respectively).
 
 ### Changed
 
