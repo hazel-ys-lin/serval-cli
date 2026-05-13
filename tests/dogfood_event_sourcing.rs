@@ -101,7 +101,16 @@ fn event_sourcing_codegen_runs_verbatim_against_mock_event_store() {
             "--no-report",
         ])
         .assert()
-        .success()
+        // Phase 3.2: the `Anonymous logs in` scenario's `Then ...
+        // emitted with: {}` is vacuous — empty-object doc-string
+        // resolves to no `expected_body`, and the scenario sets no
+        // other assertion, so strict mode flags it. The two
+        // non-vacuous scenarios still pass.
+        .code(1)
         .stdout(predicate::str::contains("[PASS]"))
-        .stdout(predicate::str::contains("3 passed, 0 failed"));
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains("2 passed, 1 failed"))
+        .stdout(predicate::str::contains(
+            "scenario ran without setting any assertion",
+        ));
 }

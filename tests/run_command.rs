@@ -589,6 +589,106 @@ fn run_vacuous_pass_allowed_with_flag() {
 }
 
 #[test]
+fn run_vacuous_empty_doc_string_then_fails_by_default() {
+    // Phase 3.2: a `Then` step whose doc string is an empty object
+    // `{}` does NOT count as an assertion. Codegen Gherkin uses this
+    // shape as documentation of "an event of this shape exists"
+    // without asserting any field. The deep-partial match would
+    // otherwise pass any body trivially; strict mode must catch
+    // the missing assertion instead.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/login");
+        then.status(200)
+            .json_body(json!({"token": "tk", "user_id": "u-1"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let feature_path = tmp.path().join("vacuous-body.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: Vacuous\n",
+            "  Scenario: empty Then doc string\n",
+            "    When I POST /login\n",
+            "    Then the LoggedIn event is emitted with:\n",
+            "      \"\"\"\n",
+            "      {}\n",
+            "      \"\"\"\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/login",
+            "--method",
+            "POST",
+            "--no-report",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("[FAIL]"))
+        .stdout(predicate::str::contains(
+            "scenario ran without setting any assertion",
+        ));
+}
+
+#[test]
+fn run_empty_doc_string_paired_with_status_assertion_still_passes() {
+    // The vacuous-body silencer must not break the legitimate case
+    // where the doc string is empty but another assertion (here the
+    // built-in status scan on `Then status should be 200`) carries
+    // the real check.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(Method::POST).path("/login");
+        then.status(200)
+            .json_body(json!({"token": "tk", "user_id": "u-1"}));
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let feature_path = tmp.path().join("vacuous-body-with-status.feature");
+    std::fs::write(
+        &feature_path,
+        concat!(
+            "Feature: Vacuous body with status\n",
+            "  Scenario: empty Then doc string but status fires\n",
+            "    When I POST /login\n",
+            "    Then status should be 200\n",
+            "    And the LoggedIn event is emitted with:\n",
+            "      \"\"\"\n",
+            "      {}\n",
+            "      \"\"\"\n",
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("serval")
+        .unwrap()
+        .args([
+            "run",
+            feature_path.to_str().unwrap(),
+            "--base-url",
+            &server.base_url(),
+            "--endpoint",
+            "/login",
+            "--method",
+            "POST",
+            "--no-report",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[PASS]"));
+}
+
+#[test]
 fn run_captures_response_field_into_scenario_variable() {
     // Phase 3.0: a login pattern captures `/access_token` from the
     // response body; a subsequent pattern reads it via `{{$token}}`

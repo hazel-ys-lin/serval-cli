@@ -580,7 +580,9 @@ fn execute_sync_action(
         Action::AssertBodyMatches => {
             if let Some(doc) = &step.doc_string {
                 let substituted = substitute_placeholders(doc, example_data);
-                if let Ok(json) = serde_json::from_str::<Value>(&substituted) {
+                if let Ok(json) = serde_json::from_str::<Value>(&substituted)
+                    && !is_vacuous_expected_body(&json)
+                {
                     context.expected_body = Some(json);
                 }
             }
@@ -757,6 +759,20 @@ fn apply_doc_string_template(
 }
 
 // ---------- private helpers (formerly methods on TestRunner) ----------
+
+/// True when a parsed doc-string body is too empty to carry an
+/// assertion. Codegen Gherkin commonly writes `Then ... emitted with:
+/// {}` as documentation of "an event of this shape is emitted" with
+/// no field requirements; deep-partial matching `{}` against any
+/// response body would pass trivially and produce false-PASS
+/// reports. Treating it as a no-op lets strict mode catch the
+/// scenario as having no assertion. Empty arrays are intentionally
+/// not flagged here — `[]` plausibly means "expect empty list"; that
+/// gap needs an explicit assert-equals action, not a vacuous-PASS
+/// silencer.
+fn is_vacuous_expected_body(v: &Value) -> bool {
+    matches!(v, Value::Object(map) if map.is_empty())
+}
 
 fn scan_status_code(text: &str) -> Option<i16> {
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -952,6 +968,65 @@ mod tests {
             ctx.request_body.is_none(),
             "Then doc string should not pollute request_body"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_object_doc_string_on_then_does_not_set_expected_body() {
+        // Phase 3.2: codegen Gherkin uses `Then ... emitted with: {}`
+        // to mean "an event of this shape exists" without asserting
+        // any field. Setting expected_body = {} would deep-partial
+        // match any body trivially. The engine drops it so strict
+        // mode catches the missing assertion.
+        let patterns = builtin_patterns();
+        let mut step = outcome_step("the response is");
+        step.doc_string = Some("{}".to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert!(
+            ctx.expected_body.is_none(),
+            "empty object doc-string should leave expected_body unset; got {:?}",
+            ctx.expected_body
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_object_doc_string_around_status_keeps_status_assertion() {
+        // The Outcome step text triggers two built-in patterns:
+        // status scan AND assert-body-matches. The status assertion
+        // should still fire even though the doc-string body is
+        // dropped as vacuous.
+        let patterns = builtin_patterns();
+        let mut step = outcome_step("status should be 200");
+        step.doc_string = Some("{}".to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert_eq!(ctx.expected_status, Some(StatusMatcher::Exact(200)));
+        assert!(ctx.expected_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_array_doc_string_still_sets_expected_body() {
+        // Empty arrays are intentionally NOT flagged as vacuous —
+        // `[]` may plausibly mean "expect empty list". A future
+        // assert-equals action will tighten this; for now the
+        // current partial-match behaviour is preserved.
+        let patterns = builtin_patterns();
+        let mut step = outcome_step("the view returns");
+        step.doc_string = Some("[]".to_string());
+        let mut ctx = ScenarioContext::default();
+        apply_sync_only(&patterns, &step, &mut ctx, &Value::Null).await;
+        assert_eq!(ctx.expected_body, Some(serde_json::json!([])));
+    }
+
+    #[test]
+    fn is_vacuous_expected_body_only_flags_empty_object() {
+        assert!(is_vacuous_expected_body(&serde_json::json!({})));
+        assert!(!is_vacuous_expected_body(&serde_json::json!({"a": 1})));
+        assert!(!is_vacuous_expected_body(&serde_json::json!([])));
+        assert!(!is_vacuous_expected_body(&serde_json::json!([1, 2])));
+        assert!(!is_vacuous_expected_body(&Value::Null));
+        assert!(!is_vacuous_expected_body(&serde_json::json!("")));
+        assert!(!is_vacuous_expected_body(&serde_json::json!(0)));
     }
 
     #[tokio::test]

@@ -49,6 +49,21 @@ any minor or pre-release bump.
 
 ### Changed
 
+- **Phase 3.2** — `Action::AssertBodyMatches` now skips an empty
+  `{}` doc-string instead of setting `expected_body = {}`. Codegen
+  Gherkin commonly writes `Then ... emitted with: {}` as
+  documentation of "an event of this shape is emitted" without
+  asserting any field; the prior deep-partial match passed any
+  response body trivially, producing silent false-PASS reports.
+  Strict mode now flags the missing assertion. Empty arrays are
+  intentionally NOT flagged — `[]` plausibly means "expect empty
+  list"; tightening that requires an explicit assert-equals
+  action, not a vacuous-PASS silencer.
+  - Behaviour change visible in `tests/dogfood_event_sourcing`:
+    the fixture's `Anonymous logs in` scenario was vacuously
+    passing because its `Then ... emitted with: {}` body
+    assertion matched anything; it now correctly surfaces as
+    FAIL with the strict-mode hint.
 - `patterns::apply` swapped its `&Client, &str` parameter pair
   for an `&ApplyContext` struct bundling client, base URL, and
   global headers. Pure refactor — runner integration unchanged.
