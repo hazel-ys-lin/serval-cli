@@ -150,6 +150,13 @@ pub enum Action {
     /// fire after built-ins, so the scoped form wins on collision.
     AssertBodyMatchesAt { pointer: String },
 
+    /// Assert the response body is an *empty* collection — `[]` or
+    /// `{}`. Unlike `AssertBodyMatches` with `[]` (which deep-partial
+    /// matches and so passes for ANY array), this checks emptiness
+    /// exactly. For codegen Gherkin steps like `Then the view returns
+    /// an empty list`, which carry no doc-string.
+    AssertBodyEmpty,
+
     /// Set `expected_status` to a closed range `[min, max]`. Used
     /// by user patterns that need to assert "any 4xx" without
     /// pinning to a specific status code (e.g. failure-mode steps
@@ -306,6 +313,7 @@ enum TomlAction {
     AssertBodyMatchesAt {
         pointer: String,
     },
+    AssertBodyEmpty,
     AssertExpectedStatusInRange {
         min: i16,
         max: i16,
@@ -391,6 +399,7 @@ fn toml_to_action(t: TomlAction) -> Action {
         TomlAction::SetRequestBodyFromDocString => Action::SetRequestBodyFromDocString,
         TomlAction::AssertBodyMatches => Action::AssertBodyMatches,
         TomlAction::AssertBodyMatchesAt { pointer } => Action::AssertBodyMatchesAt { pointer },
+        TomlAction::AssertBodyEmpty => Action::AssertBodyEmpty,
         TomlAction::AssertExpectedStatusInRange { min, max } => {
             Action::AssertExpectedStatusInRange { min, max }
         }
@@ -673,6 +682,9 @@ fn execute_sync_action(
                     context.expected_body_pointer = Some(pointer.clone());
                 }
             }
+        }
+        Action::AssertBodyEmpty => {
+            context.expect_empty_body = true;
         }
         Action::HttpRequest { .. } => {
             debug_assert!(false, "execute_sync_action called for HttpRequest variant");

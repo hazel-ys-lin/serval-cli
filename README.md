@@ -80,11 +80,12 @@ serval run specs/health.feature
 
 The run writes a JSON report under `.serval/reports/`; list and compare past runs with `serval history` and `serval diff`.
 
-## Subcommand surface (v0.5.1)
+## Subcommand surface (v0.6.0)
 
 ```text
 serval run <path> [--env NAME | --base-url URL] [--endpoint P] [--method M]
                   [--patterns-file PATH] [--header "Key: Value"]…
+                  [--reset-url URL] [--tags TAG]… [--scenario TITLE]…
                   [--allow-no-assertions]
                   [--report-dir DIR] [--no-report] [--json]
                   [--config-file PATH]
@@ -109,6 +110,17 @@ serval spec validate [<path>]      [--json]
 - **User patterns** layer on top via `~/.serval/patterns.toml` (global) or `<repo>/.serval/patterns.toml` (project), or any path via `--patterns-file`. They map your team's Gherkin convention to your backend's actual HTTP shape — including body reshape (`rename` / `defaults` / `overrides`), JSON-pointer-scoped deep-match (`assert_body_matches_at`), seed-POST idempotency (`accepted_status`), and stream-id ↔ backend-UUID symbol chains (templated `capture_response` + `doc_captures`).
 
 See [`examples/event-sourcing.toml`](examples/event-sourcing.toml) for a working pattern set against the event-sourcing convention (`POST /streams/{id}/events/{Event}`, `POST /streams/{id}/commands/{Cmd}`, `GET /views/{View}`). The full CHANGELOG entry for Phase 3 ([CHANGELOG.md](CHANGELOG.md#050---2026-05-13)) walks through every TOML schema knob.
+
+### Stateful codegen Gherkin (v0.6.0)
+
+Big codegen `.feature` files assume each scenario starts from a clean slate and use fixed fixtures for server-generated values. Four knobs make them runnable against a real stateful backend:
+
+- **`--reset-url`** — POST a reset endpoint before each scenario (no state bleed across scenarios).
+- **`<<…>>` wildcards** — an expected string like `<<uuid>>` matches any actual value (server-generated UUIDs, dynamic URLs, timestamps).
+- **`assert_body_empty`** action — assert `[]`/`{}` exactly (for `returns an empty list`-style steps with no doc-string).
+- **`--tags` / `--scenario`** — run only the green subset while the rest is iterated upstream (greenlist ratchet).
+
+A pattern can also bind the *same* step text to different actions by `keyword_type` — e.g. `the <View> view returns:` POSTs a view-seed in `Context` (Given) position but asserts in `Outcome` (Then) position.
 
 ## Exit codes (public API)
 

@@ -9,6 +9,38 @@ any minor or pre-release bump.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-17
+
+Run codegen event-sourcing Gherkin against a **stateful** backend
+without hand-editing the do-not-edit `.feature` file. Motivated by a
+real run (a backend's 78-scenario codegen feature): 25/78 → 67/78
+once these four gaps closed; the remaining failures are upstream
+fixture limits (server-generated UUIDs needing `<<…>>` placeholders,
+binary-size fixtures) or by-design-absent endpoints — not tool gaps.
+See [#1](https://github.com/hazel-ys-lin/serval-cli/issues/1).
+
+### Added
+
+- **`--reset-url <URL>`** (`run`): POST to this URL once before each
+  scenario to reset backend state, so scenarios that don't carry an
+  explicit clean-slate step don't bleed state into each other (shared
+  stream ids → PK collisions). Absolute `http(s)://…` is used verbatim;
+  a bare path is joined onto the base URL. Falls back to
+  `$SERVAL_RESET_URL`. A reset failure is an infra error (exit 2).
+- **Wildcard value matching** in deep-match: an expected string of the
+  form `<<…>>` (≥1 inner char, e.g. `<<uuid>>`, `<<*>>`) matches any
+  actual value at that position. Lets fixed codegen fixtures verify
+  against server-generated UUIDs / dynamic URLs / timestamps.
+- **`--tags <TAG>…` / `--scenario <TITLE>…`** (`run`): run only the
+  matching subset of a `.feature` file (tags match ANY, leading `@`
+  optional; titles match exactly; the two AND). For a greenlist-ratchet
+  workflow over a big codegen feature where only some scenarios are
+  green yet. Warns when the filter matches zero scenarios.
+- **`assert_body_empty`** pattern action: assert the response body is
+  an empty collection (`[]` or `{}`) — exactly, unlike a deep-partial
+  `[]` which matches any array. For steps like
+  `Then the view returns an empty list` that carry no doc-string.
+
 ## [0.5.1] - 2026-05-13
 
 Packaging-only follow-up to v0.5.0. The default cargo-dist

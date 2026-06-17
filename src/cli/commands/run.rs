@@ -93,6 +93,27 @@ pub struct RunArgs {
     #[arg(long)]
     pub allow_no_assertions: bool,
 
+    /// POST to this URL once before each scenario to reset backend
+    /// state. Lets codegen Gherkin (which assumes a clean slate per
+    /// scenario) run without scenarios bleeding state into each other.
+    /// Absolute `http(s)://…` is used verbatim; a bare path is joined
+    /// onto the base URL (e.g. `/test/reset`). Falls back to
+    /// `$SERVAL_RESET_URL`.
+    #[arg(long, env = "SERVAL_RESET_URL")]
+    pub reset_url: Option<String>,
+
+    /// Run only scenarios carrying ANY of these tags (leading `@`
+    /// optional). Repeat the flag or comma-separate. Without it, all
+    /// scenarios run. For a greenlist-ratchet workflow over a big
+    /// codegen `.feature` where only some scenarios are green yet.
+    #[arg(long = "tags", value_name = "TAG", value_delimiter = ',')]
+    pub tags: Vec<String>,
+
+    /// Run only scenarios whose title exactly matches (repeat for
+    /// several). Combines with `--tags` as AND.
+    #[arg(long = "scenario", value_name = "TITLE")]
+    pub scenarios: Vec<String>,
+
     /// Extra HTTP header to send with every request (both
     /// pattern-driven `Action::HttpRequest` calls and the
     /// frontmatter fallback). Repeat the flag for multiple
@@ -125,6 +146,23 @@ fn map_error_to_exit(e: &Error) -> i32 {
     }
 }
 
+/// Whether a scenario passes the `--tags` / `--scenario` filters.
+/// Empty filter = no constraint. Tags match on ANY (leading `@`
+/// ignored on both sides); titles match exactly. The two combine as AND.
+fn scenario_selected(
+    scenario: &crate::gherkin::ParsedScenario,
+    tags: &[String],
+    titles: &[String],
+) -> bool {
+    let tag_ok = tags.is_empty()
+        || scenario.tags.iter().any(|t| {
+            tags.iter()
+                .any(|f| f.trim_start_matches('@') == t.trim_start_matches('@'))
+        });
+    let title_ok = titles.is_empty() || titles.iter().any(|t| t == &scenario.title);
+    tag_ok && title_ok
+}
+
 fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
     let started_at = time::OffsetDateTime::now_utc();
 
@@ -149,20 +187,30 @@ fn execute(args: RunArgs, format: OutputFormat) -> Result<bool> {
         timeout: Duration::from_secs(args.timeout),
         allow_no_assertions: args.allow_no_assertions,
         custom_headers,
+        reset_url: args.reset_url.clone(),
         ..Default::default()
     })?
     .extend_patterns(user_patterns);
 
+    let mut selected = 0usize;
     let all_results = runtime.block_on(async {
         let mut all = Vec::new();
         for feature in &features {
             for scenario in &feature.scenarios {
+                if !scenario_selected(scenario, &args.tags, &args.scenarios) {
+                    continue;
+                }
+                selected += 1;
                 let results = runner.run_scenario(scenario, &api, &env).await?;
                 all.extend(results);
             }
         }
         Result::Ok(all)
     })?;
+
+    if selected == 0 && (!args.tags.is_empty() || !args.scenarios.is_empty()) {
+        eprintln!("warning: --tags/--scenario matched 0 scenarios — nothing ran");
+    }
 
     let finished_at = time::OffsetDateTime::now_utc();
 
@@ -317,5 +365,48 @@ fn print_results(results: &[TestResult], format: OutputFormat) {
             println!();
             println!("  {passed} passed, {failed} failed, {total} total");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gherkin::ParsedScenario;
+
+    fn scen(title: &str, tags: &[&str]) -> ParsedScenario {
+        ParsedScenario {
+            title: title.to_string(),
+            description: None,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            steps: vec![],
+            examples: vec![],
+        }
+    }
+
+    #[test]
+    fn no_filter_selects_all() {
+        assert!(scenario_selected(&scen("any", &[]), &[], &[]));
+    }
+
+    #[test]
+    fn tag_filter_matches_any_at_sign_optional() {
+        let s = scen("x", &["happy-path", "smoke"]);
+        // stored tags carry no '@'; filter may pass with or without it.
+        assert!(scenario_selected(&s, &["happy-path".into()], &[]));
+        assert!(scenario_selected(&s, &["@happy-path".into()], &[]));
+        assert!(!scenario_selected(&s, &["slow".into()], &[]));
+    }
+
+    #[test]
+    fn title_filter_is_exact_and_ands_with_tags() {
+        let s = scen("顯示文件列表", &["happy-path"]);
+        assert!(scenario_selected(&s, &[], &["顯示文件列表".into()]));
+        assert!(!scenario_selected(&s, &[], &["別的".into()]));
+        // AND: tag matches but title doesn't → excluded.
+        assert!(!scenario_selected(
+            &s,
+            &["happy-path".into()],
+            &["別的".into()]
+        ));
     }
 }
