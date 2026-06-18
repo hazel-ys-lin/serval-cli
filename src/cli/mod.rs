@@ -57,7 +57,9 @@ enum Command {
     Status(commands::status::StatusArgs),
 
     /// Execute a `.feature` file against an HTTP target.
-    Run(commands::run::RunArgs),
+    /// Boxed: `RunArgs` is by far the largest variant (many flags) —
+    /// boxing keeps `Command` small (clippy::large_enum_variant).
+    Run(Box<commands::run::RunArgs>),
 
     /// List past run reports under `.serval/reports/`.
     History(commands::history::HistoryArgs),
@@ -103,7 +105,7 @@ where
 
     match cli.command {
         Command::Status(args) => commands::status::run(args, format),
-        Command::Run(args) => commands::run::run(args, format),
+        Command::Run(args) => commands::run::run(*args, format),
         Command::History(args) => commands::history::run(args, format),
         Command::Diff(args) => commands::diff::run(args, format),
         Command::Api(args) => commands::api::run(args, format),
