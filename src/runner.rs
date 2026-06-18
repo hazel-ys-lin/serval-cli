@@ -57,6 +57,12 @@ pub struct TestConfig {
     /// `--allow-no-assertions` to opt out — useful for pure
     /// fire-and-forget scenarios.
     pub allow_no_assertions: bool,
+    /// When set, the runner POSTs to this URL once before each scenario
+    /// to reset backend state — so codegen Gherkin scenarios (which
+    /// assume a clean slate per scenario) don't bleed state into each
+    /// other. Absolute (`http(s)://…`) is used verbatim; otherwise it's
+    /// joined onto the env base URL as a path (e.g. `/test/reset`).
+    pub reset_url: Option<String>,
 }
 
 impl Default for TestConfig {
@@ -66,6 +72,7 @@ impl Default for TestConfig {
             auth_token: None,
             custom_headers: HashMap::new(),
             allow_no_assertions: false,
+            reset_url: None,
         }
     }
 }
@@ -143,6 +150,10 @@ pub struct ScenarioContext {
     /// `AssertBodyMatches` behaviour).
     pub expected_body_pointer: Option<String>,
     pub expected_body_contains: Vec<String>,
+    /// When true, the response body must be an empty collection
+    /// (`[]` or `{}`). Set by `Action::AssertBodyEmpty` — used by
+    /// codegen steps like `Then the view returns an empty list`.
+    pub expect_empty_body: bool,
     /// Data table from a step (used as setup data; not currently
     /// asserted against).
     pub setup_data: Option<Vec<serde_json::Value>>,
@@ -205,6 +216,13 @@ impl TestRunner {
         api: &ApiSpec,
         env: &EnvSpec,
     ) -> Result<Vec<TestResult>> {
+        // Per-scenario state reset (opt-in via --reset-url). Codegen
+        // Gherkin assumes each scenario starts clean; without this,
+        // scenarios sharing a stream id collide on the backend. A reset
+        // failure is an infra problem, not a test failure → propagate as
+        // Err (exit 2), not a per-example pass:false.
+        self.reset(env).await?;
+
         let examples: Cow<[ParsedExample]> = if scenario.examples.is_empty() {
             Cow::Owned(vec![ParsedExample {
                 data: serde_json::Value::Null,
@@ -224,6 +242,33 @@ impl TestRunner {
         }
 
         Ok(results)
+    }
+
+    /// POST to the configured reset URL (no-op when unset). Resolves an
+    /// absolute URL verbatim, else joins the path onto `env.base_url`.
+    /// Any non-2xx or transport failure is an infra Error (exit 2).
+    async fn reset(&self, env: &EnvSpec) -> Result<()> {
+        let Some(target) = &self.config.reset_url else {
+            return Ok(());
+        };
+        let url = if target.starts_with("http://") || target.starts_with("https://") {
+            target.clone()
+        } else {
+            format!("{}{}", env.base_url.trim_end_matches('/'), target)
+        };
+        let resp = self
+            .client
+            .post(&url)
+            .send()
+            .await
+            .map_err(|e| Error::System(format!("reset POST {url} failed: {e}")))?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Error::System(format!(
+                "reset POST {url} returned {status}, want 2xx"
+            )));
+        }
+        Ok(())
     }
 
     async fn run_example(
@@ -464,6 +509,17 @@ impl TestRunner {
             ));
         }
 
+        if context.expect_empty_body {
+            let empty = match body {
+                serde_json::Value::Array(a) => a.is_empty(),
+                serde_json::Value::Object(o) => o.is_empty(),
+                _ => false,
+            };
+            if !empty {
+                return Err(format!("Expected an empty collection, got: {body}"));
+            }
+        }
+
         for pattern in &context.expected_body_contains {
             let body_str = body.to_string();
             if !body_str.contains(pattern) {
@@ -505,6 +561,13 @@ impl TestRunner {
     }
 
     fn json_contains(&self, actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+        // Wildcard: an expected string of the form `<<...>>` matches any
+        // actual value at that position (server-generated uuids, dynamic
+        // URLs, timestamps). Mirrors the ir-to-tdd Go helpers' `<<TAG>>`
+        // convention so the same codegen fixtures verify under both.
+        if is_wildcard(expected) {
+            return true;
+        }
         match (actual, expected) {
             (serde_json::Value::Object(actual_obj), serde_json::Value::Object(expected_obj)) => {
                 expected_obj.iter().all(|(key, expected_value)| {
@@ -526,6 +589,13 @@ impl TestRunner {
     }
 }
 
+/// True when `v` is a wildcard placeholder string `<<...>>` (≥1 char
+/// between the brackets). Such a value matches anything in deep-match.
+fn is_wildcard(v: &serde_json::Value) -> bool {
+    matches!(v, serde_json::Value::String(s)
+        if s.starts_with("<<") && s.ends_with(">>") && s.len() > 4)
+}
+
 /// True when the scenario context has at least one assertion set.
 /// Used by strict mode (the default) to flag vacuous PASSes —
 /// scenarios that run their HTTP calls but never set an
@@ -534,6 +604,7 @@ fn has_any_assertion(context: &ScenarioContext) -> bool {
     context.expected_status.is_some()
         || context.expected_body.is_some()
         || !context.expected_body_contains.is_empty()
+        || context.expect_empty_body
 }
 
 #[cfg(test)]
@@ -544,6 +615,56 @@ mod tests {
     // covered by `patterns::tests::substitute_placeholders_*`.
     // Status-code extraction is covered by
     // `patterns::tests::status_pattern_picks_first_in_range_number`.
+
+    #[test]
+    fn validate_expect_empty_body() {
+        let runner = TestRunner::new().unwrap();
+        let ctx = ScenarioContext {
+            expect_empty_body: true,
+            ..Default::default()
+        };
+        // empty array / object pass; non-empty array fails.
+        assert!(
+            runner
+                .validate_response(200, &serde_json::json!([]), &ctx)
+                .is_ok()
+        );
+        assert!(
+            runner
+                .validate_response(200, &serde_json::json!({}), &ctx)
+                .is_ok()
+        );
+        assert!(
+            runner
+                .validate_response(200, &serde_json::json!([{"id": 1}]), &ctx)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn json_contains_wildcard_matches_any_value() {
+        let runner = TestRunner::new().unwrap();
+        // `<<...>>` in expected matches any actual value at that position.
+        let actual = serde_json::json!({
+            "fileId": "6a3e60dc-0f81-4a5e-a0bf-d1c41212c9c4",
+            "fileUrl": "/files/6a3e60dc-0f81-4a5e-a0bf-d1c41212c9c4",
+            "name": "img"
+        });
+        let expected = serde_json::json!({
+            "fileId": "<<uuid>>",
+            "fileUrl": "<<*>>",
+            "name": "img"
+        });
+        assert!(runner.json_contains(&actual, &expected));
+
+        // Non-wildcard string still compared literally.
+        let mismatch = serde_json::json!({ "name": "other" });
+        assert!(!runner.json_contains(&actual, &mismatch));
+
+        // `<<>>` (no inner char) is NOT a wildcard — literal compare.
+        assert!(!is_wildcard(&serde_json::json!("<<>>")));
+        assert!(is_wildcard(&serde_json::json!("<<x>>")));
+    }
 
     #[test]
     fn test_json_contains() {
